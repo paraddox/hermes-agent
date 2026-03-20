@@ -34,3 +34,14 @@ class TestHonchoToolSessionContext:
         assert result == {"result": ["explicit"]}
         explicit_manager.get_peer_card.assert_called_once_with("explicit-session")
         global_manager.get_peer_card.assert_not_called()
+
+    def test_tool_schema_descriptions_are_backend_neutral(self):
+        descriptions = [
+            honcho_tools._PROFILE_SCHEMA["description"],
+            honcho_tools._SEARCH_SCHEMA["description"],
+            honcho_tools._SEARCH_SCHEMA["parameters"]["properties"]["query"]["description"],
+            honcho_tools._QUERY_SCHEMA["description"],
+            honcho_tools._CONCLUDE_SCHEMA["description"],
+        ]
+
+        assert all("Honcho" not in description for description in descriptions)

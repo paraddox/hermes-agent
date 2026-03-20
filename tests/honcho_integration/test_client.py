@@ -2,7 +2,9 @@
 
 import json
 import os
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -21,6 +23,7 @@ class TestHonchoClientConfigDefaults:
         config = HonchoClientConfig()
         assert config.host == "hermes"
         assert config.workspace_id == "hermes"
+        assert config.base_url is None
         assert config.api_key is None
         assert config.environment == "production"
         assert config.enabled is False
@@ -75,6 +78,12 @@ class TestFromEnv:
         assert config.base_url == "http://localhost:8000"
         assert config.enabled is True
 
+    def test_custom_host_defaults_workspace_and_ai_peer(self):
+        config = HonchoClientConfig.from_env(host="telegram")
+        assert config.host == "telegram"
+        assert config.workspace_id == "telegram"
+        assert config.ai_peer == "telegram"
+
 
 class TestFromGlobalConfig:
     def test_missing_config_falls_back_to_env(self, tmp_path):
@@ -85,6 +94,17 @@ class TestFromGlobalConfig:
         # Should fall back to from_env
         assert config.enabled is False
         assert config.api_key is None
+
+    def test_missing_config_preserves_requested_host_when_falling_back_to_env(self, tmp_path):
+        with patch.dict(os.environ, {}, clear=True):
+            config = HonchoClientConfig.from_global_config(
+                host="telegram",
+                config_path=tmp_path / "nonexistent.json",
+            )
+
+        assert config.host == "telegram"
+        assert config.workspace_id == "telegram"
+        assert config.ai_peer == "telegram"
 
     def test_reads_full_config(self, tmp_path):
         config_file = tmp_path / "config.json"
@@ -194,6 +214,19 @@ class TestFromGlobalConfig:
         config = HonchoClientConfig.from_global_config(config_path=config_file)
         # Should fall back to from_env without crashing
         assert isinstance(config, HonchoClientConfig)
+
+    def test_corrupt_config_preserves_requested_host_when_falling_back_to_env(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text("not valid json{{{")
+
+        config = HonchoClientConfig.from_global_config(
+            host="telegram",
+            config_path=config_file,
+        )
+
+        assert config.host == "telegram"
+        assert config.workspace_id == "telegram"
+        assert config.ai_peer == "telegram"
 
     def test_api_key_env_fallback(self, tmp_path):
         config_file = tmp_path / "config.json"
@@ -337,3 +370,49 @@ class TestResetHonchoClient:
         assert mod._honcho_client is not None
         reset_honcho_client()
         assert mod._honcho_client is None
+
+
+class TestGetHonchoClient:
+    def teardown_method(self):
+        reset_honcho_client()
+
+    def test_uses_explicit_base_url_when_config_provides_one(self):
+        fake_honcho_cls = MagicMock(return_value=MagicMock())
+        config = HonchoClientConfig(
+            api_key="test-key",
+            enabled=True,
+            base_url="https://honcho.example/v1",
+        )
+
+        with patch.dict(sys.modules, {"honcho": SimpleNamespace(Honcho=fake_honcho_cls)}):
+            get_honcho_client(config)
+
+        fake_honcho_cls.assert_called_once_with(
+            workspace_id="hermes",
+            api_key="test-key",
+            environment="production",
+            base_url="https://honcho.example/v1",
+        )
+
+    def test_falls_back_to_cli_config_base_url_when_config_has_none(self):
+        fake_honcho_cls = MagicMock(return_value=MagicMock())
+        config = HonchoClientConfig(
+            api_key="test-key",
+            enabled=True,
+        )
+
+        with (
+            patch.dict(sys.modules, {"honcho": SimpleNamespace(Honcho=fake_honcho_cls)}),
+            patch(
+                "hermes_cli.config.load_config",
+                return_value={"honcho": {"base_url": "https://fallback.example/v1"}},
+            ),
+        ):
+            get_honcho_client(config)
+
+        fake_honcho_cls.assert_called_once_with(
+            workspace_id="hermes",
+            api_key="test-key",
+            environment="production",
+            base_url="https://fallback.example/v1",
+        )

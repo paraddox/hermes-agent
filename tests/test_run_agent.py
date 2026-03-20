@@ -18,6 +18,7 @@ import pytest
 
 import run_agent
 from honcho_integration.client import HonchoClientConfig
+from memory_backends.base import MemoryBackendLoadError
 from run_agent import AIAgent, _inject_honcho_turn_context
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 
@@ -40,6 +41,14 @@ def _make_tool_defs(*names: str) -> list:
         }
         for n in names
     ]
+
+
+class _FakeMemorySession:
+    def __init__(self, messages=None):
+        self.messages = list(messages or [])
+
+    def add_message(self, role: str, content: str, **kwargs):
+        self.messages.append({"role": role, "content": content, **kwargs})
 
 
 @pytest.fixture()
@@ -1682,6 +1691,15 @@ class TestSystemPromptStability:
         assert "Honcho memory was retrieved from prior sessions" in content
         assert "## Honcho Memory" in content
 
+    def test_inject_honcho_turn_context_uses_backend_display_name(self):
+        content = _inject_honcho_turn_context(
+            "hello",
+            "## External Test Memory\nprior context",
+            backend_name="External Test",
+        )
+        assert "External Test memory was retrieved from prior sessions" in content
+        assert "Honcho memory was retrieved from prior sessions" not in content
+
     def test_honcho_continuing_session_keeps_turn_context_out_of_system_prompt(self, agent):
         captured = {}
 
@@ -1770,13 +1788,16 @@ class TestHonchoActivation:
             peer_name="user",
             ai_peer="hermes",
         )
+        manifest = SimpleNamespace(backend_id="honcho")
 
         with (
             patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
             patch("run_agent.check_toolset_requirements", return_value={}),
             patch("run_agent.OpenAI"),
-            patch("honcho_integration.client.HonchoClientConfig.from_global_config", return_value=hcfg),
-            patch("honcho_integration.client.get_honcho_client") as mock_client,
+            patch(
+                "run_agent.load_memory_backend",
+                return_value=SimpleNamespace(manager=None, config=hcfg, manifest=manifest),
+            ) as mock_loader,
         ):
             agent = AIAgent(
                 api_key="test-key-1234567890",
@@ -1787,7 +1808,7 @@ class TestHonchoActivation:
 
         assert agent._honcho is None
         assert agent._honcho_config is hcfg
-        mock_client.assert_not_called()
+        mock_loader.assert_called_once()
 
     def test_injected_honcho_manager_skips_fresh_client_init(self):
         hcfg = HonchoClientConfig(
@@ -1800,7 +1821,7 @@ class TestHonchoActivation:
         )
         manager = MagicMock()
         manager._config = hcfg
-        manager.get_or_create.return_value = SimpleNamespace(messages=[])
+        manager.get_or_create.return_value = _FakeMemorySession()
         manager.get_prefetch_context.return_value = {"representation": "Known user", "card": ""}
 
         with (
@@ -1840,7 +1861,7 @@ class TestHonchoActivation:
         )
         manager = MagicMock()
         manager._config = hcfg
-        manager.get_or_create.return_value = SimpleNamespace(messages=[])
+        manager.get_or_create.return_value = _FakeMemorySession()
         manager.get_prefetch_context.return_value = {"representation": "Known user", "card": ""}
 
         with (
@@ -1884,13 +1905,16 @@ class TestHonchoActivation:
             peer_name="user",
             ai_peer="hermes",
         )
+        manifest = SimpleNamespace(backend_id="honcho")
 
         with (
             patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search", "honcho_context")),
             patch("run_agent.check_toolset_requirements", return_value={}),
             patch("run_agent.OpenAI"),
-            patch("honcho_integration.client.HonchoClientConfig.from_global_config", return_value=hcfg),
-            patch("honcho_integration.client.get_honcho_client") as mock_client,
+            patch(
+                "run_agent.load_memory_backend",
+                return_value=SimpleNamespace(manager=None, config=hcfg, manifest=manifest),
+            ) as mock_loader,
         ):
             agent = AIAgent(
                 api_key="test-key-1234567890",
@@ -1902,7 +1926,510 @@ class TestHonchoActivation:
         assert agent._honcho is None
         assert "web_search" in agent.valid_tool_names
         assert "honcho_context" not in agent.valid_tool_names
+        mock_loader.assert_called_once()
+
+    def test_inactive_honcho_clears_stale_module_session_context(self):
+        from tools import honcho_tools
+
+        hcfg = HonchoClientConfig(
+            enabled=False,
+            api_key="honcho-key",
+            peer_name="user",
+            ai_peer="hermes",
+        )
+        manifest = SimpleNamespace(backend_id="honcho")
+
+        honcho_tools.set_session_context(MagicMock(), "old-session", capabilities={"profile"})
+        try:
+            with (
+                patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search", "honcho_profile")),
+                patch("run_agent.check_toolset_requirements", return_value={}),
+                patch("run_agent.OpenAI"),
+                patch(
+                    "run_agent.load_memory_backend",
+                    return_value=SimpleNamespace(manager=None, config=hcfg, manifest=manifest),
+                ),
+            ):
+                agent = AIAgent(
+                    api_key="test-key-1234567890",
+                    quiet_mode=True,
+                    skip_context_files=True,
+                    skip_memory=False,
+                )
+
+            assert agent._honcho is None
+            assert honcho_tools._check_honcho_available() is False
+            assert honcho_tools._session_manager is None
+            assert honcho_tools._session_key is None
+            assert honcho_tools._backend_capabilities is None
+        finally:
+            honcho_tools.clear_session_context()
+
+    def test_external_memory_backend_factory_is_used_when_configured(self):
+        class ExternalConfig:
+            enabled = True
+            peer_name = "user"
+            ai_peer = "hermes"
+            workspace_id = "external"
+            write_frequency = "async"
+            memory_mode = "hybrid"
+            recall_mode = "hybrid"
+            context_tokens = 321
+
+            def peer_memory_mode(self, peer_name):
+                return "hybrid"
+
+            def resolve_session_name(self, cwd=None, session_title=None, session_id=None):
+                return session_id or "external-session"
+
+        manager = MagicMock()
+        manager.get_or_create.return_value = _FakeMemorySession()
+        manager.get_prefetch_context.return_value = {"representation": "Known user", "card": ""}
+        manifest = SimpleNamespace(backend_id="external-test")
+
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                side_effect=[
+                    _make_tool_defs("web_search"),
+                    _make_tool_defs("web_search", "honcho_context"),
+                ],
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "run_agent.load_memory_backend",
+                return_value=SimpleNamespace(
+                    manager=manager,
+                    config=ExternalConfig(),
+                    manifest=manifest,
+                ),
+            ) as mock_loader,
+            patch("tools.honcho_tools.set_session_context"),
+            patch("honcho_integration.client.get_honcho_client") as mock_client,
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=False,
+                honcho_session_key="gateway-session",
+            )
+
+        assert agent._honcho is manager
+        mock_loader.assert_called_once()
         mock_client.assert_not_called()
+
+    def test_injected_gateway_manifest_is_preserved(self):
+        class ExternalConfig:
+            enabled = True
+            peer_name = "user"
+            ai_peer = "hermes"
+            workspace_id = "external"
+            write_frequency = "async"
+            memory_mode = "hybrid"
+            recall_mode = "hybrid"
+            context_tokens = 321
+
+            def peer_memory_mode(self, peer_name):
+                return "hybrid"
+
+            def resolve_session_name(self, cwd=None, session_title=None, session_id=None):
+                return session_id or "external-session"
+
+        manager = MagicMock()
+        manager.get_or_create.return_value = SimpleNamespace(messages=[])
+        manager.get_prefetch_context.return_value = {"representation": "Known user", "card": ""}
+        manifest = SimpleNamespace(
+            backend_id="external-test",
+            display_name="External Test",
+            capabilities=frozenset({"profile", "search"}),
+        )
+
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search", "honcho_profile", "honcho_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch("tools.honcho_tools.set_session_context"),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=False,
+                honcho_session_key="gateway-session",
+                honcho_manager=manager,
+                honcho_config=ExternalConfig(),
+                honcho_manifest=manifest,
+            )
+
+        assert agent._memory_backend_manifest is manifest
+        assert agent._memory_backend_manifest.backend_id == "external-test"
+        assert agent._memory_backend_manifest.display_name == "External Test"
+
+    def test_invalid_backend_session_shape_fails_at_activation_boundary(self):
+        class ExternalConfig:
+            enabled = True
+            peer_name = "user"
+            ai_peer = "hermes"
+            workspace_id = "external"
+            write_frequency = "async"
+            memory_mode = "hybrid"
+            recall_mode = "hybrid"
+            context_tokens = 321
+
+            def peer_memory_mode(self, peer_name):
+                return "hybrid"
+
+            def resolve_session_name(self, cwd=None, session_title=None, session_id=None):
+                return session_id or "external-session"
+
+        manager = MagicMock()
+        manager.get_or_create.return_value = {"session_key": "gateway-session"}
+        manifest = SimpleNamespace(
+            backend_id="external-test",
+            display_name="External Test",
+            capabilities=frozenset({"profile", "search", "answer", "conclude", "prefetch", "migrate"}),
+        )
+
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search", "honcho_context")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "run_agent.load_memory_backend",
+                return_value=SimpleNamespace(
+                    manager=manager,
+                    config=ExternalConfig(),
+                    manifest=manifest,
+                ),
+            ),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=False,
+                honcho_session_key="gateway-session",
+            )
+
+        assert agent._honcho is None
+        assert "honcho_context" not in agent.valid_tool_names
+
+    def test_external_backend_capabilities_hide_unsupported_honcho_tools_and_skip_prefetch(self):
+        class ExternalConfig:
+            enabled = True
+            peer_name = "user"
+            ai_peer = "hermes"
+            workspace_id = "external"
+            write_frequency = "async"
+            memory_mode = "hybrid"
+            recall_mode = "hybrid"
+            context_tokens = 321
+
+            def peer_memory_mode(self, peer_name):
+                return "hybrid"
+
+            def resolve_session_name(self, cwd=None, session_title=None, session_id=None):
+                return session_id or "external-session"
+
+        manager = MagicMock()
+        manager.get_or_create.return_value = _FakeMemorySession()
+        manifest = SimpleNamespace(
+            backend_id="external-test",
+            display_name="External Test",
+            capabilities=frozenset({"profile", "search"}),
+        )
+
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                side_effect=[
+                    _make_tool_defs("web_search"),
+                    _make_tool_defs(
+                        "web_search",
+                        "honcho_context",
+                        "honcho_profile",
+                        "honcho_search",
+                        "honcho_conclude",
+                    ),
+                ],
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "run_agent.load_memory_backend",
+                return_value=SimpleNamespace(
+                    manager=manager,
+                    config=ExternalConfig(),
+                    manifest=manifest,
+                ),
+            ),
+            patch("tools.honcho_tools.set_session_context"),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=False,
+                honcho_session_key="gateway-session",
+            )
+
+        assert "web_search" in agent.valid_tool_names
+        assert "honcho_profile" in agent.valid_tool_names
+        assert "honcho_search" in agent.valid_tool_names
+        assert "honcho_context" not in agent.valid_tool_names
+        assert "honcho_conclude" not in agent.valid_tool_names
+        manager.get_prefetch_context.assert_not_called()
+        manager.set_context_result.assert_not_called()
+
+        prompt = agent._build_system_prompt()
+        assert "External Test memory integration" in prompt
+        assert "honcho_profile" in prompt
+        assert "honcho_search" in prompt
+        assert "honcho_context <question>" not in prompt
+        assert "honcho_conclude <conclusion>" not in prompt
+        assert "hermes honcho identity" not in prompt
+        assert "hermes honcho migrate" not in prompt
+        assert "hermes honcho setup" not in prompt
+        assert "hermes honcho mode" not in prompt
+        assert "memory_backend_factory" in prompt
+
+    def test_external_backend_load_failure_reports_external_hook_guidance(self, capsys):
+        external_config = SimpleNamespace(
+            enabled=True,
+            memory_backend_factory="tests.fake:create_backend",
+        )
+
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "run_agent.load_memory_backend",
+                side_effect=MemoryBackendLoadError("bad external backend"),
+            ),
+            patch(
+                "honcho_integration.client.HonchoClientConfig.from_global_config",
+                return_value=external_config,
+            ),
+        ):
+            AIAgent(
+                api_key="test-key-1234567890",
+                quiet_mode=False,
+                skip_context_files=True,
+                skip_memory=False,
+            )
+
+        captured = capsys.readouterr()
+        assert "Memory backend init failed (external): bad external backend" in captured.out
+        assert "Check hosts.hermes.experimental.memory_backend_factory" in captured.out
+        assert "Run 'hermes honcho setup' to reconfigure." not in captured.out
+
+    def test_external_backend_prompt_advertises_supported_management_commands(self):
+        class ExternalConfig:
+            enabled = True
+            peer_name = "user"
+            ai_peer = "hermes"
+            workspace_id = "external"
+            write_frequency = "async"
+            memory_mode = "hybrid"
+            recall_mode = "hybrid"
+            context_tokens = 321
+
+            def peer_memory_mode(self, peer_name):
+                return "hybrid"
+
+            def resolve_session_name(self, cwd=None, session_title=None, session_id=None):
+                return session_id or "external-session"
+
+        manager = MagicMock()
+        manager.get_or_create.return_value = _FakeMemorySession()
+        manager.get_prefetch_context.return_value = {"representation": "Known user", "card": ""}
+        manifest = SimpleNamespace(
+            backend_id="external-test",
+            display_name="External Test",
+            capabilities=frozenset(
+                {
+                    "profile",
+                    "search",
+                    "answer",
+                    "conclude",
+                    "prefetch",
+                    "migrate",
+                    "ai_identity",
+                }
+            ),
+        )
+
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                side_effect=[
+                    _make_tool_defs("web_search"),
+                    _make_tool_defs(
+                        "web_search",
+                        "honcho_context",
+                        "honcho_profile",
+                        "honcho_search",
+                        "honcho_conclude",
+                    ),
+                ],
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "run_agent.load_memory_backend",
+                return_value=SimpleNamespace(
+                    manager=manager,
+                    config=ExternalConfig(),
+                    manifest=manifest,
+                ),
+            ),
+            patch("tools.honcho_tools.set_session_context"),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=False,
+                honcho_session_key="gateway-session",
+            )
+
+        prompt = agent._build_system_prompt()
+        assert "hermes honcho status" in prompt
+        assert "hermes honcho identity" in prompt
+        assert "hermes honcho migrate" in prompt
+        assert "hermes honcho setup" not in prompt
+        assert "hermes honcho mode" not in prompt
+
+    def test_external_backend_prompt_marks_honcho_tools_as_legacy_aliases(self):
+        class ExternalConfig:
+            enabled = True
+            peer_name = "user"
+            ai_peer = "hermes"
+            workspace_id = "external"
+            write_frequency = "async"
+            memory_mode = "hybrid"
+            recall_mode = "hybrid"
+            context_tokens = 321
+
+            def peer_memory_mode(self, peer_name):
+                return "hybrid"
+
+            def resolve_session_name(self, cwd=None, session_title=None, session_id=None):
+                return session_id or "external-session"
+
+        manager = MagicMock()
+        manager.get_or_create.return_value = _FakeMemorySession()
+        manager.get_prefetch_context.return_value = {"representation": "Known user", "card": ""}
+        manifest = SimpleNamespace(
+            backend_id="external-test",
+            display_name="External Test",
+            capabilities=frozenset(
+                {
+                    "profile",
+                    "search",
+                    "answer",
+                    "conclude",
+                    "prefetch",
+                    "migrate",
+                    "ai_identity",
+                }
+            ),
+        )
+
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                side_effect=[
+                    _make_tool_defs("web_search"),
+                    _make_tool_defs(
+                        "web_search",
+                        "honcho_context",
+                        "honcho_profile",
+                        "honcho_search",
+                        "honcho_conclude",
+                    ),
+                ],
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "run_agent.load_memory_backend",
+                return_value=SimpleNamespace(
+                    manager=manager,
+                    config=ExternalConfig(),
+                    manifest=manifest,
+                ),
+            ),
+            patch("tools.honcho_tools.set_session_context"),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=False,
+                honcho_session_key="gateway-session",
+            )
+
+        prompt = agent._build_system_prompt()
+        assert "External Test is the active backend." in prompt
+        assert "The honcho_* tool names are legacy compatibility aliases." in prompt
+        assert "Do not describe the active backend as Honcho unless the backend name is actually Honcho." in prompt
+
+    def test_external_backend_user_observation_message_is_backend_neutral(self):
+        class ExternalConfig:
+            enabled = True
+            peer_name = "user"
+            ai_peer = "hermes"
+            workspace_id = "external"
+            write_frequency = "async"
+            memory_mode = "hybrid"
+            recall_mode = "hybrid"
+            context_tokens = 321
+
+            def peer_memory_mode(self, peer_name):
+                return "hybrid"
+
+            def resolve_session_name(self, cwd=None, session_title=None, session_id=None):
+                return session_id or "external-session"
+
+        manager = MagicMock()
+        manager.get_or_create.return_value = _FakeMemorySession()
+        manifest = SimpleNamespace(
+            backend_id="external-test",
+            display_name="External Test",
+            capabilities=frozenset({"profile", "search", "answer", "conclude", "prefetch", "migrate"}),
+        )
+
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "run_agent.load_memory_backend",
+                return_value=SimpleNamespace(
+                    manager=manager,
+                    config=ExternalConfig(),
+                    manifest=manifest,
+                ),
+            ),
+            patch("tools.honcho_tools.set_session_context"),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=False,
+                honcho_session_key="gateway-session",
+            )
+
+        result = json.loads(agent._honcho_save_user_observation("Remember this"))
+        assert result["success"] is True
+        assert result["message"] == "Saved to user memory."
+        manager.create_conclusion.assert_called_once_with("gateway-session", "Remember this")
+        manager.save.assert_not_called()
 
 
 class TestHonchoPrefetchScheduling:
@@ -1914,7 +2441,7 @@ class TestHonchoPrefetchScheduling:
 
         context = agent._honcho_prefetch("what next?")
 
-        assert "Continuity synthesis" in context
+        assert "Memory synthesis" in context
         assert "migration checklist" in context
 
     def test_queue_honcho_prefetch_skips_tools_mode(self, agent):

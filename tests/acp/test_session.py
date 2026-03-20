@@ -2,7 +2,8 @@
 
 import json
 import pytest
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from acp_adapter.session import SessionManager, SessionState
 from hermes_state import SessionDB
@@ -10,6 +11,14 @@ from hermes_state import SessionDB
 
 def _mock_agent():
     return MagicMock(name="MockAIAgent")
+
+
+class _FakeMemorySession:
+    def __init__(self, messages=None):
+        self.messages = list(messages or [])
+
+    def add_message(self, role: str, content: str, **kwargs):
+        self.messages.append({"role": role, "content": content, **kwargs})
 
 
 @pytest.fixture()
@@ -50,6 +59,69 @@ class TestCreateSession:
 
     def test_get_nonexistent_session_returns_none(self, manager):
         assert manager.get_session("does-not-exist") is None
+
+    def test_acp_session_inherits_external_memory_backend_via_aiagent(self, monkeypatch):
+        class ExternalConfig:
+            enabled = True
+            peer_name = "user"
+            ai_peer = "hermes"
+            workspace_id = "external"
+            write_frequency = "async"
+            memory_mode = "hybrid"
+            recall_mode = "hybrid"
+            context_tokens = 321
+
+            def peer_memory_mode(self, peer_name):
+                return "hybrid"
+
+            def resolve_session_name(self, cwd=None, session_title=None, session_id=None):
+                return session_id or "external-session"
+
+        manager_obj = MagicMock()
+        manager_obj.get_or_create.return_value = _FakeMemorySession()
+        manager_obj.get_prefetch_context.return_value = {"representation": "Known user", "card": ""}
+        manifest = SimpleNamespace(
+            backend_id="external-test",
+            display_name="External Test",
+            capabilities=frozenset({"profile", "search", "answer", "conclude", "prefetch", "migrate"}),
+        )
+
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"model": "test/model"})
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            lambda requested=None: {
+                "provider": "openrouter",
+                "api_mode": "chat_completions",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "test-key",
+            },
+        )
+
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                side_effect=[
+                    [{"type": "function", "function": {"name": "web_search", "description": "", "parameters": {"type": "object", "properties": {}}}}],
+                    [{"type": "function", "function": {"name": "web_search", "description": "", "parameters": {"type": "object", "properties": {}}}}],
+                ],
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "run_agent.load_memory_backend",
+                return_value=SimpleNamespace(
+                    manager=manager_obj,
+                    config=ExternalConfig(),
+                    manifest=manifest,
+                ),
+            ),
+            patch("tools.honcho_tools.set_session_context"),
+        ):
+            session_manager = SessionManager()
+            state = session_manager.create_session(cwd="/tmp/work")
+
+        assert state.agent._honcho is manager_obj
+        assert state.agent._memory_backend_manifest.backend_id == "external-test"
 
 
 # ---------------------------------------------------------------------------

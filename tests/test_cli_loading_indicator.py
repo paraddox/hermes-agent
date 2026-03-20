@@ -1,6 +1,7 @@
 """Regression tests for loading feedback on slow slash commands."""
 
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from cli import HermesCLI
 
@@ -63,3 +64,93 @@ class TestCLILoadingIndicator:
         assert cli_obj._command_running is False
         assert cli_obj._command_status == ""
         assert invalidate_mock.call_count == 2
+
+    def test_reload_mcp_preserves_context_mode_memory_tool_hiding(self):
+        cli_obj = self._make_cli()
+        cli_obj.conversation_history = []
+
+        class StubAgent:
+            def __init__(self):
+                self.enabled_toolsets = None
+                self.tools = []
+                self.valid_tool_names = set()
+                self._honcho = object()
+                self._honcho_config = SimpleNamespace(recall_mode="context")
+                self._persist_session = MagicMock()
+
+            def _apply_memory_backend_tool_filters(self):
+                self.tools = [
+                    tool for tool in self.tools
+                    if tool["function"]["name"] == "web_search"
+                ]
+                self.valid_tool_names = {
+                    tool["function"]["name"] for tool in self.tools
+                }
+
+        cli_obj.agent = StubAgent()
+
+        tool_defs = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "honcho_profile",
+                    "description": "",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "honcho_search",
+                    "description": "",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ]
+
+        with (
+            patch("tools.mcp_tool.shutdown_mcp_servers"),
+            patch("tools.mcp_tool.discover_mcp_tools", return_value=[]),
+            patch("tools.mcp_tool._servers", {}),
+            patch("model_tools.get_tool_definitions", return_value=tool_defs),
+        ):
+            cli_obj._reload_mcp()
+
+        assert cli_obj.agent.valid_tool_names == {"web_search"}
+
+    def test_session_indicator_uses_external_backend_label_without_honcho_link(self):
+        cli_obj = self._make_cli()
+        cli_obj.session_id = "session-1"
+
+        fake_bundle = SimpleNamespace(
+            manager=object(),
+            config=SimpleNamespace(
+                enabled=True,
+                workspace_id="external-workspace",
+                resolve_session_name=lambda **kwargs: kwargs.get("session_id") or "session-1",
+            ),
+            manifest=SimpleNamespace(
+                backend_id="external-test",
+                display_name="External Test",
+            ),
+        )
+
+        with (
+            patch("memory_backends.factory.load_memory_backend", return_value=fake_bundle),
+            patch("agent.display.write_tty") as write_tty_mock,
+        ):
+            cli_obj._show_memory_backend_session_indicator()
+
+        write_tty_mock.assert_called_once()
+        rendered = write_tty_mock.call_args.args[0]
+        assert "External Test session:" in rendered
+        assert "Honcho session:" not in rendered
+        assert "https://app.honcho.dev" not in rendered

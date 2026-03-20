@@ -97,6 +97,8 @@ from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
 )
+from memory_backends.base import MemoryBackendCapability, validate_memory_backend_session
+from memory_backends.factory import load_memory_backend
 from utils import atomic_json_write
 
 HONCHO_TOOL_NAMES = {
@@ -104,6 +106,27 @@ HONCHO_TOOL_NAMES = {
     "honcho_profile",
     "honcho_search",
     "honcho_conclude",
+}
+
+_MEMORY_BACKEND_TOOL_CAPABILITIES = {
+    "honcho_profile": MemoryBackendCapability.PROFILE.value,
+    "honcho_search": MemoryBackendCapability.SEARCH.value,
+    "honcho_context": MemoryBackendCapability.ANSWER.value,
+    "honcho_conclude": MemoryBackendCapability.CONCLUDE.value,
+}
+
+_MEMORY_BACKEND_TOOL_ORDER = (
+    "honcho_context",
+    "honcho_search",
+    "honcho_profile",
+    "honcho_conclude",
+)
+
+_MEMORY_BACKEND_TOOL_HELP = {
+    "honcho_context": "  honcho_context <question>           — ask the active memory backend a question, LLM-synthesized answer",
+    "honcho_search": "  honcho_search <query>              — semantic search, raw excerpts, no LLM",
+    "honcho_profile": "  honcho_profile                     — user's peer card, key facts, no LLM",
+    "honcho_conclude": "  honcho_conclude <conclusion>       — write a fact about the user to memory",
 }
 
 
@@ -323,18 +346,24 @@ def _paths_overlap(left: Path, right: Path) -> bool:
     return left_parts[:common_len] == right_parts[:common_len]
 
 
-def _inject_honcho_turn_context(content, turn_context: str):
-    """Append Honcho recall to the current-turn user message without mutating history.
+def _inject_honcho_turn_context(
+    content,
+    turn_context: str,
+    *,
+    backend_name: str = "Honcho",
+):
+    """Append memory recall to the current-turn user message without mutating history.
 
-    The returned content is sent to the API for this turn only. Keeping Honcho
+    The returned content is sent to the API for this turn only. Keeping memory
     recall out of the system prompt preserves the stable cache prefix while
     still giving the model continuity context.
     """
     if not turn_context:
         return content
 
+    memory_label = f"{backend_name} memory" if backend_name else "memory backend"
     note = (
-        "[System note: The following Honcho memory was retrieved from prior "
+        f"[System note: The following {memory_label} was retrieved from prior "
         "sessions. It is continuity context for this turn only, not new user "
         "input.]\n\n"
         f"{turn_context}"
@@ -410,6 +439,7 @@ class AIAgent:
         honcho_session_key: str = None,
         honcho_manager=None,
         honcho_config=None,
+        honcho_manifest=None,
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
         checkpoints_enabled: bool = False,
@@ -458,6 +488,7 @@ class AIAgent:
                 When provided and Honcho is enabled in config, enables persistent cross-session user modeling.
             honcho_manager: Optional shared HonchoSessionManager owned by the caller.
             honcho_config: Optional HonchoClientConfig corresponding to honcho_manager.
+            honcho_manifest: Optional backend manifest corresponding to honcho_manager.
         """
         _install_safe_stdio()
 
@@ -898,13 +929,19 @@ class AIAgent:
         self._honcho_session_key = honcho_session_key
         self._honcho_config = None  # HonchoClientConfig | None
         self._honcho_exit_hook_registered = False
+        self._memory_backend_manifest = None
         if not skip_memory:
             try:
                 if honcho_manager is not None:
                     hcfg = honcho_config or getattr(honcho_manager, "_config", None)
                     self._honcho_config = hcfg
-                    if hcfg and self._honcho_should_activate(hcfg):
+                    if hcfg and self._honcho_should_activate(hcfg, honcho_manager):
                         self._honcho = honcho_manager
+                        self._memory_backend_manifest = honcho_manifest or SimpleNamespace(
+                            backend_id=getattr(hcfg, "backend_id", "honcho"),
+                            capabilities=getattr(hcfg, "capabilities", None),
+                            display_name=getattr(hcfg, "display_name", "Honcho"),
+                        )
                         self._activate_honcho(
                             hcfg,
                             enabled_toolsets=enabled_toolsets,
@@ -912,39 +949,37 @@ class AIAgent:
                             session_db=session_db,
                         )
                 else:
-                    from honcho_integration.client import HonchoClientConfig, get_honcho_client
-                    hcfg = HonchoClientConfig.from_global_config()
-                    self._honcho_config = hcfg
-                    if self._honcho_should_activate(hcfg):
-                        from honcho_integration.session import HonchoSessionManager
-                        client = get_honcho_client(hcfg)
-                        self._honcho = HonchoSessionManager(
-                            honcho=client,
-                            config=hcfg,
-                            context_tokens=hcfg.context_tokens,
-                        )
+                    backend = load_memory_backend()
+                    self._honcho_config = backend.config
+                    self._memory_backend_manifest = backend.manifest
+                    if self._honcho_should_activate(backend.config, backend.manager):
+                        self._honcho = backend.manager
                         self._activate_honcho(
-                            hcfg,
+                            backend.config,
                             enabled_toolsets=enabled_toolsets,
                             disabled_toolsets=disabled_toolsets,
                             session_db=session_db,
                         )
                     else:
-                        if not hcfg.enabled:
-                            logger.debug("Honcho disabled in global config")
-                        elif not hcfg.api_key:
+                        if not backend.config.enabled:
+                            logger.debug("Memory backend disabled in global config")
+                        elif backend.manager is None and getattr(backend.config, "api_key", None) is None:
                             logger.debug("Honcho enabled but no API key configured")
                         else:
-                            logger.debug("Honcho enabled but missing API key or disabled in config")
+                            logger.debug("Memory backend configured but did not produce an active manager")
             except Exception as e:
-                logger.warning("Honcho init failed — memory disabled: %s", e)
-                print(f"  Honcho init failed: {e}")
-                print("  Run 'hermes honcho setup' to reconfigure.")
+                backend_id, recovery_hint = self._memory_backend_init_failure_guidance()
+                logger.warning("Memory backend init failed — memory disabled: %s", e)
+                print(f"  Memory backend init failed ({backend_id}): {e}")
+                print(f"  {recovery_hint}")
                 self._honcho = None
 
         # Tools are initially discovered before Honcho activation. If Honcho
         # stays inactive, remove any stale honcho_* tools from prior process state.
         if not self._honcho:
+            from tools.honcho_tools import clear_session_context
+
+            clear_session_context()
             self._strip_honcho_tools_from_surface()
 
         # Gate local memory writes based on per-peer memory modes.
@@ -1825,11 +1860,124 @@ class AIAgent:
 
     # ── Honcho integration helpers ──
 
-    def _honcho_should_activate(self, hcfg) -> bool:
-        """Return True when remote Honcho should be active."""
-        if not hcfg or not hcfg.enabled or not hcfg.api_key:
+    def _honcho_should_activate(self, hcfg, manager) -> bool:
+        """Return True when the selected memory backend should be active."""
+        if not hcfg or not hcfg.enabled or manager is None:
             return False
         return True
+
+    def _memory_backend_capabilities(self) -> set[str] | None:
+        """Return active backend capabilities, or None when unbounded."""
+        if not self._memory_backend_manifest:
+            return None
+        capabilities = getattr(self._memory_backend_manifest, "capabilities", None)
+        if capabilities is None:
+            return None
+        return set(capabilities)
+
+    def _memory_backend_supports(self, capability: str) -> bool:
+        """Return True when the active backend exposes *capability*."""
+        capabilities = self._memory_backend_capabilities()
+        if capabilities is None:
+            return True
+        return capability in capabilities
+
+    def _memory_backend_display_name(self) -> str:
+        """Return the human-facing name of the active memory backend."""
+        display_name = getattr(self._memory_backend_manifest, "display_name", None)
+        if display_name:
+            return display_name
+        if self._honcho is not None:
+            return "Honcho"
+        return "Memory Backend"
+
+    def _memory_backend_tool_help_lines(self) -> list[str]:
+        """Return help lines for the memory tools actually available this turn."""
+        return [
+            _MEMORY_BACKEND_TOOL_HELP[name]
+            for name in _MEMORY_BACKEND_TOOL_ORDER
+            if name in self.valid_tool_names
+        ]
+
+    def _memory_backend_management_command_lines(self) -> list[str]:
+        """Return backend-management commands that make sense for this backend."""
+        backend_id = getattr(self._memory_backend_manifest, "backend_id", "honcho")
+        if backend_id and backend_id != "honcho":
+            lines = [
+                "  hermes honcho status                    — show active backend + capabilities",
+                "  ~/.honcho/config.json → hosts.hermes.experimental.memory_backend_factory — change or disable the external backend",
+            ]
+            if self._memory_backend_supports(MemoryBackendCapability.AI_IDENTITY.value):
+                lines.append(
+                    "  hermes honcho identity [<file>] [--show] — seed or show AI peer identity"
+                )
+            if self._memory_backend_supports(MemoryBackendCapability.MIGRATE.value):
+                lines.append(
+                    "  hermes honcho migrate                   — migration guide from openclaw-honcho"
+                )
+            return lines
+
+        lines = [
+            "  hermes honcho status                    — show full config + connection",
+            "  hermes honcho mode [hybrid|honcho]       — show or set memory mode",
+            "  hermes honcho tokens [--context N] [--dialectic N] — show or set token budgets",
+            "  hermes honcho peer [--user NAME] [--ai NAME] [--reasoning LEVEL]",
+            "  hermes honcho sessions                  — list directory→session mappings",
+            "  hermes honcho map <name>                — map cwd to a session name",
+        ]
+        if self._memory_backend_supports(MemoryBackendCapability.AI_IDENTITY.value):
+            lines.append(
+                "  hermes honcho identity [<file>] [--show] — seed or show AI peer identity"
+            )
+        if self._memory_backend_supports(MemoryBackendCapability.MIGRATE.value):
+            lines.append(
+                "  hermes honcho migrate                   — migration guide from openclaw-honcho"
+            )
+        lines.append("  hermes honcho setup                     — full interactive wizard")
+        return lines
+
+    def _memory_backend_init_failure_guidance(self) -> tuple[str, str]:
+        """Return a backend label and recovery hint for init failures."""
+        manifest = self._memory_backend_manifest
+        if manifest is not None:
+            backend_id = getattr(manifest, "backend_id", "honcho")
+            if backend_id == "honcho":
+                return backend_id, "Run 'hermes honcho setup' to reconfigure."
+            return backend_id, "Check hosts.hermes.experimental.memory_backend_factory in ~/.honcho/config.json."
+
+        hcfg = self._honcho_config
+        if hcfg is None:
+            try:
+                from honcho_integration.client import HonchoClientConfig
+
+                hcfg = HonchoClientConfig.from_global_config()
+            except Exception:
+                hcfg = None
+
+        if getattr(hcfg, "memory_backend_factory", None):
+            return "external", "Check hosts.hermes.experimental.memory_backend_factory in ~/.honcho/config.json."
+
+        return "honcho", "Run 'hermes honcho setup' to reconfigure."
+
+    def _strip_unsupported_honcho_tools_from_surface(self) -> None:
+        """Remove Honcho aliases the active backend does not support."""
+        if not self.tools:
+            self.valid_tool_names = set()
+            return
+
+        self.tools = [
+            tool
+            for tool in self.tools
+            if (
+                tool.get("function", {}).get("name") not in _MEMORY_BACKEND_TOOL_CAPABILITIES
+                or self._memory_backend_supports(
+                    _MEMORY_BACKEND_TOOL_CAPABILITIES[tool["function"]["name"]]
+                )
+            )
+        ]
+        self.valid_tool_names = {
+            tool["function"]["name"] for tool in self.tools
+        } if self.tools else set()
 
     def _strip_honcho_tools_from_surface(self) -> None:
         """Remove Honcho tools from the active tool surface."""
@@ -1844,6 +1992,15 @@ class AIAgent:
         self.valid_tool_names = {
             tool["function"]["name"] for tool in self.tools
         } if self.tools else set()
+
+    def _apply_memory_backend_tool_filters(self) -> None:
+        """Reapply active memory-backend visibility rules after tool refreshes."""
+        if not self._honcho:
+            return
+
+        self._strip_unsupported_honcho_tools_from_surface()
+        if self._honcho_config and self._honcho_config.recall_mode == "context":
+            self._strip_honcho_tools_from_surface()
 
     def _activate_honcho(
         self,
@@ -1872,8 +2029,10 @@ class AIAgent:
                 or "hermes-default"
             )
 
-        honcho_sess = self._honcho.get_or_create(self._honcho_session_key)
-        if not honcho_sess.messages:
+        honcho_sess = validate_memory_backend_session(
+            self._honcho.get_or_create(self._honcho_session_key)
+        )
+        if not honcho_sess.messages and self._memory_backend_supports(MemoryBackendCapability.MIGRATE.value):
             try:
                 from hermes_cli.config import get_hermes_home
 
@@ -1887,7 +2046,11 @@ class AIAgent:
 
         from tools.honcho_tools import set_session_context
 
-        set_session_context(self._honcho, self._honcho_session_key)
+        set_session_context(
+            self._honcho,
+            self._honcho_session_key,
+            capabilities=self._memory_backend_capabilities(),
+        )
 
         # Rebuild tool surface after Honcho context injection. Tool availability
         # is check_fn-gated and may change once session context is attached.
@@ -1899,18 +2062,25 @@ class AIAgent:
         self.valid_tool_names = {
             tool["function"]["name"] for tool in self.tools
         } if self.tools else set()
+        self._apply_memory_backend_tool_filters()
 
         if hcfg.recall_mode == "context":
-            self._strip_honcho_tools_from_surface()
             if not self.quiet_mode:
-                print("  Honcho active — recall_mode: context (Honcho tools hidden)")
+                print(
+                    f"  {getattr(self._memory_backend_manifest, 'display_name', 'Honcho')} active — "
+                    "recall_mode: context (Honcho tools hidden)"
+                )
         else:
             if not self.quiet_mode:
-                print(f"  Honcho active — recall_mode: {hcfg.recall_mode}")
+                print(
+                    f"  {getattr(self._memory_backend_manifest, 'display_name', 'Honcho')} active — "
+                    f"recall_mode: {hcfg.recall_mode}"
+                )
 
         logger.info(
-            "Honcho active (session: %s, user: %s, workspace: %s, "
+            "%s active (session: %s, user: %s, workspace: %s, "
             "write_frequency: %s, memory_mode: %s)",
+            getattr(self._memory_backend_manifest, "display_name", "Honcho"),
             self._honcho_session_key,
             hcfg.peer_name,
             hcfg.workspace_id,
@@ -1919,7 +2089,7 @@ class AIAgent:
         )
 
         recall_mode = hcfg.recall_mode
-        if recall_mode != "tools":
+        if recall_mode != "tools" and self._memory_backend_supports(MemoryBackendCapability.PREFETCH.value):
             try:
                 ctx = self._honcho.get_prefetch_context(self._honcho_session_key)
                 if ctx:
@@ -1955,18 +2125,26 @@ class AIAgent:
             return
 
         recall_mode = (self._honcho_config.recall_mode if self._honcho_config else "hybrid")
-        if recall_mode == "tools":
+        if recall_mode == "tools" or not self._memory_backend_supports(MemoryBackendCapability.PREFETCH.value):
             return
 
         try:
             self._honcho.prefetch_context(self._honcho_session_key, user_message)
-            self._honcho.prefetch_dialectic(self._honcho_session_key, user_message or "What were we working on?")
+            if self._memory_backend_supports(MemoryBackendCapability.ANSWER.value):
+                self._honcho.prefetch_dialectic(
+                    self._honcho_session_key,
+                    user_message or "What were we working on?",
+                )
         except Exception as exc:
             logger.debug("Honcho background prefetch failed (non-fatal): %s", exc)
 
     def _honcho_prefetch(self, user_message: str) -> str:
         """Assemble the first-turn Honcho context from the pre-warmed cache."""
-        if not self._honcho or not self._honcho_session_key:
+        if (
+            not self._honcho
+            or not self._honcho_session_key
+            or not self._memory_backend_supports(MemoryBackendCapability.PREFETCH.value)
+        ):
             return ""
         try:
             parts = []
@@ -1986,14 +2164,16 @@ class AIAgent:
                 if ai_card:
                     parts.append(ai_card)
 
-            dialectic = self._honcho.pop_dialectic_result(self._honcho_session_key)
+            dialectic = None
+            if self._memory_backend_supports(MemoryBackendCapability.ANSWER.value):
+                dialectic = self._honcho.pop_dialectic_result(self._honcho_session_key)
             if dialectic:
-                parts.append(f"## Continuity synthesis\n{dialectic}")
+                parts.append(f"## Memory synthesis\n{dialectic}")
 
             if not parts:
                 return ""
             header = (
-                "# Honcho Memory (persistent cross-session context)\n"
+                f"# {getattr(self._memory_backend_manifest, 'display_name', 'Memory Backend')} Memory (persistent cross-session context)\n"
                 "Use this to answer questions about the user, prior sessions, "
                 "and what you were working on together. Do not call tools to "
                 "look up information that is already present here.\n"
@@ -2004,32 +2184,41 @@ class AIAgent:
             return ""
 
     def _honcho_save_user_observation(self, content: str) -> str:
-        """Route a memory tool target=user add to Honcho.
-
-        Sends the content as a user peer message so Honcho's reasoning
-        model can incorporate it into the user representation.
-        """
+        """Route a memory tool target=user add through the active backend."""
         if not content or not content.strip():
             return json.dumps({"success": False, "error": "Content cannot be empty."})
+        if not self._memory_backend_supports(MemoryBackendCapability.CONCLUDE.value):
+            return json.dumps({
+                "success": False,
+                "error": "Active memory backend does not support conclusion writes.",
+            })
         try:
-            session = self._honcho.get_or_create(self._honcho_session_key)
-            session.add_message("user", f"[observation] {content.strip()}")
-            self._honcho.save(session)
+            ok = self._honcho.create_conclusion(
+                self._honcho_session_key,
+                content.strip(),
+            )
+            if not ok:
+                return json.dumps({
+                    "success": False,
+                    "error": "Memory backend did not persist the observation.",
+                })
             return json.dumps({
                 "success": True,
                 "target": "user",
-                "message": "Saved to Honcho user model.",
+                "message": "Saved to user memory.",
             })
         except Exception as e:
             logger.debug("Honcho user observation failed: %s", e)
-            return json.dumps({"success": False, "error": f"Honcho save failed: {e}"})
+            return json.dumps({"success": False, "error": f"Memory save failed: {e}"})
 
     def _honcho_sync(self, user_content: str, assistant_content: str) -> None:
         """Sync the user/assistant message pair to Honcho."""
         if not self._honcho or not self._honcho_session_key:
             return
         try:
-            session = self._honcho.get_or_create(self._honcho_session_key)
+            session = validate_memory_backend_session(
+                self._honcho.get_or_create(self._honcho_session_key)
+            )
             session.add_message("user", user_content)
             session.add_message("assistant", assistant_content)
             self._honcho.save(session)
@@ -2038,7 +2227,7 @@ class AIAgent:
         except Exception as e:
             logger.warning("Honcho sync failed: %s", e)
             if not self.quiet_mode:
-                print(f"  Honcho write failed: {e}")
+                print(f"  {self._memory_backend_display_name()} write failed: {e}")
 
     def _build_system_prompt(self, system_message: str = None) -> str:
         """
@@ -2100,50 +2289,43 @@ class AIAgent:
             mode = hcfg.memory_mode if hcfg else "hybrid"
             freq = hcfg.write_frequency if hcfg else "async"
             recall_mode = hcfg.recall_mode if hcfg else "hybrid"
+            backend_name = self._memory_backend_display_name()
+            tool_help_lines = self._memory_backend_tool_help_lines()
             honcho_block = (
-                "# Honcho memory integration\n"
+                f"# {backend_name} memory integration\n"
                 f"Active. Session: {self._honcho_session_key}. "
                 f"Mode: {mode}. Write frequency: {freq}. Recall: {recall_mode}.\n"
             )
+            if getattr(self._memory_backend_manifest, "backend_id", "honcho") != "honcho":
+                honcho_block += (
+                    f"{backend_name} is the active backend. "
+                    "The honcho_* tool names are legacy compatibility aliases. "
+                    "Do not describe the active backend as Honcho unless the backend name is actually Honcho.\n"
+                )
             if recall_mode == "context":
                 honcho_block += (
-                    "Honcho context is injected into this system prompt below. "
-                    "All memory retrieval comes from this context — no Honcho tools "
+                    f"{backend_name} context is injected into this system prompt below. "
+                    "All memory retrieval comes from this context — no memory tools "
                     "are available. Answer questions about the user, prior sessions, "
-                    "and recent work directly from the Honcho Memory section.\n"
+                    "and recent work directly from the memory section below.\n"
                 )
             elif recall_mode == "tools":
-                honcho_block += (
-                    "Honcho tools:\n"
-                    "  honcho_context <question>           — ask Honcho a question, LLM-synthesized answer\n"
-                    "  honcho_search <query>                   — semantic search, raw excerpts, no LLM\n"
-                    "  honcho_profile                          — user's peer card, key facts, no LLM\n"
-                    "  honcho_conclude <conclusion>            — write a fact about the user to memory\n"
-                )
+                if tool_help_lines:
+                    honcho_block += "Available memory tools:\n" + "\n".join(tool_help_lines) + "\n"
             else:  # hybrid
                 honcho_block += (
-                    "Honcho context (user representation, peer card, and recent session summary) "
-                    "is injected into this system prompt below. Use it to answer continuity "
-                    "questions ('where were we?', 'what were we working on?') WITHOUT calling "
-                    "any tools. Only call Honcho tools when you need information beyond what is "
-                    "already present in the Honcho Memory section.\n"
-                    "Honcho tools:\n"
-                    "  honcho_context <question>           — ask Honcho a question, LLM-synthesized answer\n"
-                    "  honcho_search <query>                   — semantic search, raw excerpts, no LLM\n"
-                    "  honcho_profile                          — user's peer card, key facts, no LLM\n"
-                    "  honcho_conclude <conclusion>            — write a fact about the user to memory\n"
+                    f"{backend_name} context (user representation, peer card, and recent session summary) "
+                    "is injected into this system prompt below. Use it to answer questions like "
+                    "('where were we?', 'what were we working on?') WITHOUT calling "
+                    "any tools. Only call memory tools when you need information beyond what is "
+                    "already present in the memory section below.\n"
                 )
+                if tool_help_lines:
+                    honcho_block += "Available memory tools:\n" + "\n".join(tool_help_lines) + "\n"
+            management_lines = self._memory_backend_management_command_lines()
             honcho_block += (
                 "Management commands (refer users here instead of explaining manually):\n"
-                "  hermes honcho status                    — show full config + connection\n"
-                "  hermes honcho mode [hybrid|honcho]       — show or set memory mode\n"
-                "  hermes honcho tokens [--context N] [--dialectic N] — show or set token budgets\n"
-                "  hermes honcho peer [--user NAME] [--ai NAME] [--reasoning LEVEL]\n"
-                "  hermes honcho sessions                  — list directory→session mappings\n"
-                "  hermes honcho map <name>                — map cwd to a session name\n"
-                "  hermes honcho identity [<file>] [--show] — seed or show AI peer identity\n"
-                "  hermes honcho migrate                   — migration guide from openclaw-honcho\n"
-                "  hermes honcho setup                     — full interactive wizard"
+                + "\n".join(management_lines)
             )
             prompt_parts.append(honcho_block)
 
@@ -5396,7 +5578,9 @@ class AIAgent:
 
                 if idx == current_turn_user_idx and msg.get("role") == "user" and self._honcho_turn_context:
                     api_msg["content"] = _inject_honcho_turn_context(
-                        api_msg.get("content", ""), self._honcho_turn_context
+                        api_msg.get("content", ""),
+                        self._honcho_turn_context,
+                        backend_name=self._memory_backend_display_name(),
                     )
 
                 # For ALL assistant messages, pass reasoning back to the API

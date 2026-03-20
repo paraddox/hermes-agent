@@ -4,6 +4,7 @@ import os
 import sys
 import types
 from argparse import Namespace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -74,6 +75,20 @@ class TestHonchoDoctorConfigDetection:
 
         assert not doctor._honcho_is_configured_for_doctor()
 
+    def test_reports_configured_for_external_memory_backend(self, monkeypatch):
+        fake_config = SimpleNamespace(
+            enabled=True,
+            api_key="",
+            memory_backend_factory="pkg.module:create_backend",
+        )
+
+        monkeypatch.setattr(
+            "honcho_integration.client.HonchoClientConfig.from_global_config",
+            lambda: fake_config,
+        )
+
+        assert doctor._honcho_is_configured_for_doctor()
+
 
 def test_run_doctor_sets_interactive_env_for_tool_checks(monkeypatch, tmp_path):
     """Doctor should present CLI-gated tools as available in CLI context."""
@@ -136,3 +151,104 @@ def test_check_gateway_service_linger_skips_when_service_not_installed(monkeypat
     out = capsys.readouterr().out
     assert out == ""
     assert issues == []
+
+
+def test_memory_backend_doctor_status_reports_builtin_capabilities(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}")
+
+    fake_config = SimpleNamespace(
+        enabled=True,
+        api_key="honcho-key",
+        workspace_id="workspace-1",
+        memory_mode="hybrid",
+        write_frequency="async",
+        memory_backend_factory=None,
+    )
+    fake_bundle = SimpleNamespace(
+        manager=object(),
+        config=fake_config,
+        manifest=SimpleNamespace(
+            backend_id="honcho",
+            capabilities=frozenset({"search", "profile"}),
+        ),
+    )
+
+    monkeypatch.setattr("honcho_integration.client.GLOBAL_CONFIG_PATH", Path(config_path))
+    monkeypatch.setattr(
+        "honcho_integration.client.HonchoClientConfig.from_global_config",
+        lambda: fake_config,
+    )
+    monkeypatch.setattr(
+        "memory_backends.factory.load_memory_backend",
+        lambda: fake_bundle,
+    )
+
+    level, text, detail, issue = doctor._memory_backend_doctor_status()
+
+    assert level == "ok"
+    assert text == "Honcho connected"
+    assert "caps=profile,search" in detail
+    assert issue is None
+
+
+def test_memory_backend_doctor_status_reports_disabled_external_backend(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}")
+
+    fake_config = SimpleNamespace(
+        enabled=False,
+        api_key="",
+        memory_backend_factory="pkg.module:create_backend",
+    )
+
+    monkeypatch.setattr("honcho_integration.client.GLOBAL_CONFIG_PATH", Path(config_path))
+    monkeypatch.setattr(
+        "honcho_integration.client.HonchoClientConfig.from_global_config",
+        lambda: fake_config,
+    )
+
+    level, text, detail, issue = doctor._memory_backend_doctor_status()
+
+    assert level == "info"
+    assert text == "External memory backend disabled"
+    assert "enabled: true" in detail
+    assert issue is None
+
+
+def test_memory_backend_doctor_status_supports_env_only_honcho_config(monkeypatch, tmp_path):
+    missing_config_path = tmp_path / "missing-config.json"
+
+    fake_config = SimpleNamespace(
+        enabled=True,
+        api_key="honcho-key",
+        workspace_id="workspace-1",
+        memory_mode="hybrid",
+        write_frequency="async",
+        memory_backend_factory=None,
+    )
+    fake_bundle = SimpleNamespace(
+        manager=object(),
+        config=fake_config,
+        manifest=SimpleNamespace(
+            backend_id="honcho",
+            capabilities=frozenset({"search", "profile"}),
+        ),
+    )
+
+    monkeypatch.setattr("honcho_integration.client.GLOBAL_CONFIG_PATH", missing_config_path)
+    monkeypatch.setattr(
+        "honcho_integration.client.HonchoClientConfig.from_global_config",
+        lambda: fake_config,
+    )
+    monkeypatch.setattr(
+        "memory_backends.factory.load_memory_backend",
+        lambda: fake_bundle,
+    )
+
+    level, text, detail, issue = doctor._memory_backend_doctor_status()
+
+    assert level == "ok"
+    assert text == "Honcho connected"
+    assert "caps=profile,search" in detail
+    assert issue is None

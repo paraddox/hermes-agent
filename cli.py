@@ -3462,11 +3462,19 @@ class HermesCLI:
                                                 old_key = self.agent._honcho_session_key
                                                 self.agent._honcho.get_or_create(new_key)
                                                 self.agent._honcho_session_key = new_key
-                                                from tools.honcho_tools import set_session_context
-                                                set_session_context(self.agent._honcho, new_key)
-                                                from agent.display import honcho_session_line, write_tty
-                                                write_tty(honcho_session_line(hcfg.workspace_id, new_key) + "\n")
-                                                _cprint(f"  Honcho session: {old_key} → {new_key}")
+                                                from honcho_integration.cli import _bind_memory_session_context
+                                                _bind_memory_session_context(self.agent, new_key)
+                                                from agent.display import write_tty
+
+                                                manifest = getattr(self.agent, "_memory_backend_manifest", None)
+                                                line = self._render_memory_session_indicator(
+                                                    new_key,
+                                                    getattr(hcfg, "workspace_id", "hermes"),
+                                                    manifest,
+                                                )
+                                                write_tty(line + "\n")
+                                                session_label = getattr(manifest, "display_name", "Honcho")
+                                                _cprint(f"  {session_label} session: {old_key} → {new_key}")
                                         except Exception:
                                             pass
                                 else:
@@ -4514,6 +4522,9 @@ class HermesCLI:
                 self.agent.valid_tool_names = {
                     tool["function"]["name"] for tool in self.agent.tools
                 } if self.agent.tools else set()
+                apply_memory_filters = getattr(self.agent, "_apply_memory_backend_tool_filters", None)
+                if callable(apply_memory_filters):
+                    apply_memory_filters()
 
             # Inject a message at the END of conversation history so the
             # model knows tools changed.  Appended after all existing
@@ -5727,21 +5738,60 @@ class HermesCLI:
         self._invalidate(min_interval=0.0)
         return True
 
+    def _render_memory_session_indicator(
+        self,
+        session_name: str,
+        workspace_id: str,
+        manifest=None,
+    ) -> str:
+        """Render a backend-aware session indicator for the interactive CLI."""
+        from agent.display import honcho_session_line, memory_session_line
+
+        backend_id = getattr(manifest, "backend_id", "honcho")
+        if backend_id == "honcho":
+            return honcho_session_line(workspace_id, session_name)
+
+        display_name = getattr(manifest, "display_name", "Memory Backend")
+        return memory_session_line(
+            session_name,
+            label=f"{display_name} session",
+        )
+
+    def _show_memory_backend_session_indicator(self) -> None:
+        """Write the current active memory session to the TTY when available."""
+        try:
+            from agent.display import write_tty
+            from memory_backends.factory import load_memory_backend
+
+            bundle = load_memory_backend()
+            cfg = getattr(bundle, "config", None)
+            if not cfg or not getattr(cfg, "enabled", False) or getattr(bundle, "manager", None) is None:
+                return
+
+            resolve_session_name = getattr(cfg, "resolve_session_name", None)
+            if not callable(resolve_session_name):
+                return
+
+            session_name = resolve_session_name(session_id=self.session_id)
+            if not session_name:
+                return
+
+            workspace_id = getattr(cfg, "workspace_id", "hermes")
+            line = self._render_memory_session_indicator(
+                session_name,
+                workspace_id,
+                getattr(bundle, "manifest", None),
+            )
+            write_tty(line + "\n")
+        except Exception:
+            pass
+
     def run(self):
         """Run the interactive CLI loop with persistent input at bottom."""
         self.show_banner()
 
-        # One-line Honcho session indicator (TTY-only, not captured by agent)
-        try:
-            from honcho_integration.client import HonchoClientConfig
-            from agent.display import honcho_session_line, write_tty
-            hcfg = HonchoClientConfig.from_global_config()
-            if hcfg.enabled and hcfg.api_key:
-                sname = hcfg.resolve_session_name(session_id=self.session_id)
-                if sname:
-                    write_tty(honcho_session_line(hcfg.workspace_id, sname) + "\n")
-        except Exception:
-            pass
+        # One-line memory-session indicator (TTY-only, not captured by agent)
+        self._show_memory_backend_session_indicator()
 
         # If resuming a session, load history and display it immediately
         # so the user has context before typing their first message.

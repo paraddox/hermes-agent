@@ -82,6 +82,8 @@ _hermes_home = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
 # User-managed env files should override stale shell exports on restart.
 from dotenv import load_dotenv  # backward-compat for tests that monkeypatch this symbol
 from hermes_cli.env_loader import load_hermes_dotenv
+from memory_backends.base import MemoryBackendLoadError
+from memory_backends.factory import load_memory_backend
 _env_path = _hermes_home / '.env'
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / '.env')
 
@@ -391,41 +393,54 @@ class GatewayRunner:
             self._honcho_managers = {}
         if not hasattr(self, "_honcho_configs"):
             self._honcho_configs = {}
+        if not hasattr(self, "_honcho_manifests"):
+            self._honcho_manifests = {}
 
         if session_key in self._honcho_managers:
-            return self._honcho_managers[session_key], self._honcho_configs.get(session_key)
+            return (
+                self._honcho_managers[session_key],
+                self._honcho_configs.get(session_key),
+                self._honcho_manifests.get(session_key),
+            )
 
         try:
-            from honcho_integration.client import HonchoClientConfig, get_honcho_client
-            from honcho_integration.session import HonchoSessionManager
-
-            hcfg = HonchoClientConfig.from_global_config()
-            if not hcfg.enabled or not hcfg.api_key:
-                return None, hcfg
-
-            client = get_honcho_client(hcfg)
-            manager = HonchoSessionManager(
-                honcho=client,
-                config=hcfg,
-                context_tokens=hcfg.context_tokens,
-            )
+            bundle = load_memory_backend()
+            hcfg = bundle.config
+            manager = bundle.manager
+            if not hcfg.enabled or manager is None:
+                return None, hcfg, bundle.manifest
             self._honcho_managers[session_key] = manager
             self._honcho_configs[session_key] = hcfg
-            return manager, hcfg
+            self._honcho_manifests[session_key] = bundle.manifest
+            return manager, hcfg, bundle.manifest
+        except MemoryBackendLoadError:
+            raise
         except Exception as e:
             logger.debug("Gateway Honcho init failed for %s: %s", session_key, e)
-            return None, None
+            raise MemoryBackendLoadError(str(e)) from e
 
     def _shutdown_gateway_honcho(self, session_key: str) -> None:
         """Flush and close the persistent Honcho manager for a gateway session."""
         managers = getattr(self, "_honcho_managers", None)
         configs = getattr(self, "_honcho_configs", None)
-        if managers is None or configs is None:
+        manifests = getattr(self, "_honcho_manifests", None)
+        if managers is None or configs is None or manifests is None:
             return
 
         manager = managers.pop(session_key, None)
         configs.pop(session_key, None)
+        manifests.pop(session_key, None)
         if not manager:
+            return
+        # External backends may intentionally share a single manager across
+        # multiple session keys. Flush pending writes when one session ends,
+        # but only shut the shared manager down after the final reference is
+        # gone from the gateway cache.
+        if any(other is manager for other in managers.values()):
+            try:
+                manager.flush_all()
+            except Exception as e:
+                logger.debug("Gateway Honcho flush failed for %s: %s", session_key, e)
             return
         try:
             manager.shutdown()
@@ -525,6 +540,13 @@ class GatewayRunner:
             # formatted ("anthropic/claude-opus-4.6") which fails when the
             # active provider is openai-codex.
             model = _resolve_gateway_model()
+            cached_honcho_manager = None
+            cached_honcho_config = None
+            cached_honcho_manifest = None
+            if honcho_session_key:
+                cached_honcho_manager = getattr(self, "_honcho_managers", {}).get(honcho_session_key)
+                cached_honcho_config = getattr(self, "_honcho_configs", {}).get(honcho_session_key)
+                cached_honcho_manifest = getattr(self, "_honcho_manifests", {}).get(honcho_session_key)
 
             tmp_agent = AIAgent(
                 **runtime_kwargs,
@@ -534,6 +556,9 @@ class GatewayRunner:
                 enabled_toolsets=["memory", "skills"],
                 session_id=old_session_id,
                 honcho_session_key=honcho_session_key,
+                honcho_manager=cached_honcho_manager,
+                honcho_config=cached_honcho_config,
+                honcho_manifest=cached_honcho_manifest,
             )
 
             # Build conversation history from transcript
@@ -565,7 +590,7 @@ class GatewayRunner:
             )
             logger.info("Pre-reset memory flush completed for session %s", old_session_id)
             # Flush any queued Honcho writes before the session is dropped
-            if getattr(tmp_agent, '_honcho', None):
+            if getattr(tmp_agent, '_honcho', None) and cached_honcho_manager is None:
                 try:
                     tmp_agent._honcho.shutdown()
                 except Exception:
@@ -4567,7 +4592,15 @@ class GatewayRunner:
                 }
 
             pr = self._provider_routing
-            honcho_manager, honcho_config = self._get_or_create_gateway_honcho(session_key)
+            try:
+                honcho_manager, honcho_config, honcho_manifest = self._get_or_create_gateway_honcho(session_key)
+            except MemoryBackendLoadError as exc:
+                return {
+                    "final_response": f"⚠️ Memory backend init failed: {exc}",
+                    "messages": [],
+                    "api_calls": 0,
+                    "tools": [],
+                }
             reasoning_config = self._load_reasoning_config()
             self._reasoning_config = reasoning_config
             # Set up streaming consumer if enabled
@@ -4624,6 +4657,7 @@ class GatewayRunner:
                 honcho_session_key=session_key,
                 honcho_manager=honcho_manager,
                 honcho_config=honcho_config,
+                honcho_manifest=honcho_manifest,
                 session_db=self._session_db,
                 fallback_model=self._fallback_model,
             )

@@ -596,11 +596,26 @@ def _osc8_link(url: str, text: str) -> str:
     return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
 
 
+def memory_session_line(
+    session_name: str,
+    *,
+    label: str = "Memory session",
+    url: str | None = None,
+) -> str:
+    """One-line session indicator with optional hyperlink support."""
+    rendered_name = f"{_SKY_BLUE}{session_name}{_ANSI_RESET}"
+    if url:
+        rendered_name = _osc8_link(url, rendered_name)
+    return f"{_DIM}{label}:{_ANSI_RESET} {rendered_name}"
+
+
 def honcho_session_line(workspace: str, session_name: str) -> str:
     """One-line session indicator: `Honcho session: <clickable name>`."""
-    url = honcho_session_url(workspace, session_name)
-    linked_name = _osc8_link(url, f"{_SKY_BLUE}{session_name}{_ANSI_RESET}")
-    return f"{_DIM}Honcho session:{_ANSI_RESET} {linked_name}"
+    return memory_session_line(
+        session_name,
+        label="Honcho session",
+        url=honcho_session_url(workspace, session_name),
+    )
 
 
 def write_tty(text: str) -> None:

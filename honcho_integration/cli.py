@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import importlib
 from pathlib import Path
 
 GLOBAL_CONFIG_PATH = Path.home() / ".honcho" / "config.json"
@@ -35,6 +36,112 @@ def _resolve_api_key(cfg: dict) -> str:
     """Resolve API key with host -> root -> env fallback."""
     host_key = ((cfg.get("hosts") or {}).get(HOST) or {}).get("apiKey")
     return host_key or cfg.get("apiKey", "") or os.environ.get("HONCHO_API_KEY", "")
+
+
+def _bind_memory_session_context(agent, session_key: str) -> None:
+    """Rebind the active memory tool context after a session-key change."""
+    from tools.honcho_tools import set_session_context
+
+    capabilities = None
+    get_capabilities = getattr(agent, "_memory_backend_capabilities", None)
+    if callable(get_capabilities):
+        capabilities = get_capabilities()
+    set_session_context(agent._honcho, session_key, capabilities=capabilities)
+
+
+def _memory_backend_supports(manifest, capability: str) -> bool:
+    """Return True when the active backend advertises *capability*."""
+    capabilities = getattr(manifest, "capabilities", None)
+    if capabilities is None:
+        return True
+    return capability in capabilities
+
+
+def _is_external_backend_selected(resolved_cfg, bundle) -> bool:
+    """Return True when Hermes resolved an out-of-tree memory backend."""
+    if getattr(resolved_cfg, "memory_backend_factory", None):
+        return True
+    backend_id = getattr(getattr(bundle, "manifest", None), "backend_id", None)
+    return bool(backend_id and backend_id != "honcho")
+
+
+def _memory_backend_label(resolved_cfg, bundle=None) -> str:
+    """Return a human-facing label for the active or configured backend."""
+    manifest = getattr(bundle, "manifest", None)
+    display_name = getattr(manifest, "display_name", None)
+    if display_name:
+        return display_name
+    if getattr(resolved_cfg, "memory_backend_factory", None):
+        return "External memory backend"
+    return "Honcho"
+
+
+def _probe_external_backend_status(factory_path: str, *, host: str = HOST, config_path: Path | None = None):
+    """Return optional lightweight status information for an external backend."""
+    module_name, sep, _attr_name = str(factory_path or "").partition(":")
+    if not sep or not module_name:
+        return None
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:
+        return None
+
+    probe = getattr(module, "probe_backend_status", None)
+    if not callable(probe):
+        return None
+
+    try:
+        return probe(host=host, config_path=str(config_path or GLOBAL_CONFIG_PATH))
+    except Exception:
+        return None
+
+
+def _memory_backend_tool_lines(bundle) -> list[str]:
+    """Return conversation-tool help lines allowed by the active backend."""
+    if bundle is None:
+        return []
+
+    tool_lines = []
+    if _memory_backend_supports(bundle.manifest, "answer"):
+        tool_lines.append(
+            "    honcho_context   — ask the memory backend a question, get a synthesized answer (LLM)"
+        )
+    if _memory_backend_supports(bundle.manifest, "search"):
+        tool_lines.append(
+            "    honcho_search        — semantic search over stored context (no LLM)"
+        )
+    if _memory_backend_supports(bundle.manifest, "profile"):
+        tool_lines.append(
+            "    honcho_profile       — fast peer card snapshot (no LLM)"
+        )
+    if _memory_backend_supports(bundle.manifest, "conclude"):
+        tool_lines.append(
+            "    honcho_conclude      — write a conclusion/fact back to memory (no LLM)"
+        )
+    return tool_lines
+
+
+def _load_cli_memory_backend(require_manager: bool = True):
+    """Load the active Hermes memory backend for CLI management commands."""
+    from honcho_integration.client import HonchoClientConfig
+    from memory_backends.factory import load_memory_backend
+
+    resolved_cfg = HonchoClientConfig.from_global_config()
+    bundle = load_memory_backend()
+    config = bundle.config or resolved_cfg
+    external_selected = _is_external_backend_selected(resolved_cfg, bundle)
+
+    if require_manager:
+        if not getattr(config, "enabled", False):
+            raise RuntimeError("Memory backend is disabled.")
+        if bundle.manager is None:
+            if external_selected:
+                raise RuntimeError("External memory backend is configured but inactive.")
+            if not getattr(config, "api_key", None):
+                raise RuntimeError("No API key configured. Run 'hermes honcho setup' first.")
+            raise RuntimeError("Memory backend is not connected.")
+
+    return config, bundle, config.resolve_session_name()
 
 
 def _prompt(label: str, default: str | None = None, secret: bool = False) -> str:
@@ -216,17 +323,9 @@ def cmd_setup(args) -> None:
 def cmd_status(args) -> None:
     """Show current Honcho config and connection status."""
     try:
-        import honcho  # noqa: F401
-    except ImportError:
-        print("  honcho-ai is not installed. Run: hermes honcho setup\n")
-        return
-
-    cfg = _read_config()
-
-    if not cfg:
-        print("  No Honcho config found at ~/.honcho/config.json")
-        print("  Run 'hermes honcho setup' to configure.\n")
-        return
+        cfg = _read_config()
+    except Exception:
+        cfg = {}
 
     try:
         from honcho_integration.client import HonchoClientConfig, get_honcho_client
@@ -235,25 +334,103 @@ def cmd_status(args) -> None:
         print(f"  Config error: {e}\n")
         return
 
+    if not cfg and not hcfg.api_key and not hcfg.memory_backend_factory:
+        print("  No Honcho config found at ~/.honcho/config.json")
+        print("  Run 'hermes honcho setup' to configure.\n")
+        return
+
+    external_bundle = None
+    external_error = None
+    external_probe = None
+    active_cfg = hcfg
+    if hcfg.memory_backend_factory:
+        try:
+            from memory_backends.factory import load_memory_backend
+
+            external_bundle = load_memory_backend()
+            active_cfg = getattr(external_bundle, "config", None) or hcfg
+        except Exception as e:
+            external_error = e
+            external_probe = _probe_external_backend_status(
+                hcfg.memory_backend_factory,
+                host=hcfg.host,
+                config_path=GLOBAL_CONFIG_PATH,
+            )
+            if external_probe is not None:
+                active_cfg = external_probe.get("config") or active_cfg
+
     api_key = hcfg.api_key or ""
     masked = f"...{api_key[-8:]}" if len(api_key) > 8 else ("set" if api_key else "not set")
+    api_key_display = "n/a (external backend)" if hcfg.memory_backend_factory else masked
+    peer_name = getattr(active_cfg, "peer_name", None)
+    resolve_session_name = getattr(active_cfg, "resolve_session_name", None)
+    session_key = (
+        resolve_session_name() if callable(resolve_session_name) else None
+    )
 
     print(f"\nHoncho status\n" + "─" * 40)
     print(f"  Enabled:        {hcfg.enabled}")
-    print(f"  API key:        {masked}")
-    print(f"  Workspace:      {hcfg.workspace_id}")
+    print(f"  API key:        {api_key_display}")
+    print(f"  Workspace:      {getattr(active_cfg, 'workspace_id', hcfg.workspace_id)}")
     print(f"  Host:           {hcfg.host}")
     print(f"  Config path:    {GLOBAL_CONFIG_PATH}")
-    print(f"  AI peer:        {hcfg.ai_peer}")
-    print(f"  User peer:      {hcfg.peer_name or 'not set'}")
-    print(f"  Session key:    {hcfg.resolve_session_name()}")
-    print(f"  Recall mode:    {hcfg.recall_mode}")
-    print(f"  Memory mode:    {hcfg.memory_mode}")
-    if hcfg.peer_memory_modes:
+    print(f"  AI peer:        {getattr(active_cfg, 'ai_peer', hcfg.ai_peer)}")
+    print(f"  User peer:      {peer_name or 'not set'}")
+    print(f"  Session key:    {session_key or 'not set'}")
+    print(f"  Recall mode:    {getattr(active_cfg, 'recall_mode', hcfg.recall_mode)}")
+    print(f"  Memory mode:    {getattr(active_cfg, 'memory_mode', hcfg.memory_mode)}")
+    if hcfg.memory_backend_factory:
+        print(f"  Backend hook:   {hcfg.memory_backend_factory}")
+    peer_memory_modes = getattr(active_cfg, "peer_memory_modes", None) or {}
+    if peer_memory_modes:
         print(f"  Per-peer modes:")
-        for peer, mode in hcfg.peer_memory_modes.items():
+        for peer, mode in peer_memory_modes.items():
             print(f"    {peer}: {mode}")
-    print(f"  Write freq:     {hcfg.write_frequency}")
+    print(f"  Write freq:     {getattr(active_cfg, 'write_frequency', hcfg.write_frequency)}")
+
+    if hcfg.memory_backend_factory:
+        if external_bundle is not None:
+            caps = ", ".join(sorted(external_bundle.manifest.capabilities)) or "none"
+            print(
+                f"  External backend: {external_bundle.manifest.display_name} "
+                f"({external_bundle.manifest.backend_id})"
+            )
+            print(f"  Capabilities:   {caps}")
+            if getattr(active_cfg, "enabled", False) and external_bundle.manager is not None:
+                print("\n  Active\n")
+            else:
+                reason = "disabled" if not getattr(active_cfg, "enabled", False) else "inactive"
+                print(f"\n  Not connected ({reason})\n")
+        elif external_probe is not None:
+            display_name = str(external_probe.get("display_name") or "External backend")
+            backend_id = str(external_probe.get("backend_id") or "external")
+            capabilities = external_probe.get("capabilities") or ()
+            caps = ", ".join(sorted(str(cap) for cap in capabilities)) or "none"
+            print(f"  External backend: {display_name} ({backend_id})")
+            print(f"  Capabilities:   {caps}")
+            detail = str(external_probe.get("detail") or "").strip()
+            state = str(external_probe.get("status") or "configured")
+            if state == "active_elsewhere":
+                print(f"\n  Active (in use by another Hermes process)")
+                if detail:
+                    print(f"  Detail:         {detail}")
+                print()
+            elif state == "disabled":
+                print("\n  Not connected (disabled)\n")
+            else:
+                print(f"\n  Configured ({state})")
+                if detail:
+                    print(f"  Detail:         {detail}")
+                print()
+        else:
+            print(f"\n  External backend failed ({external_error})\n")
+        return
+
+    try:
+        import honcho  # noqa: F401
+    except ImportError:
+        print("  honcho-ai is not installed. Run: hermes honcho setup\n")
+        return
 
     if hcfg.enabled and hcfg.api_key:
         print("\n  Connection... ", end="", flush=True)
@@ -439,81 +616,95 @@ def cmd_tokens(args) -> None:
 
 def cmd_identity(args) -> None:
     """Seed AI peer identity or show both peer representations."""
-    cfg = _read_config()
-    if not _resolve_api_key(cfg):
-        print("  No API key configured. Run 'hermes honcho setup' first.\n")
-        return
-
     file_path = getattr(args, "file", None)
     show = getattr(args, "show", False)
+    resolved_cfg = None
+    backend_label = "Honcho"
 
     try:
-        from honcho_integration.client import HonchoClientConfig, get_honcho_client
-        from honcho_integration.session import HonchoSessionManager
-        hcfg = HonchoClientConfig.from_global_config()
-        client = get_honcho_client(hcfg)
-        mgr = HonchoSessionManager(honcho=client, config=hcfg)
-        session_key = hcfg.resolve_session_name()
+        from honcho_integration.client import HonchoClientConfig
+
+        resolved_cfg = HonchoClientConfig.from_global_config()
+        backend_label = _memory_backend_label(resolved_cfg)
+        hcfg, bundle, session_key = _load_cli_memory_backend(require_manager=True)
+        backend_label = _memory_backend_label(resolved_cfg or hcfg, bundle)
+        if not _memory_backend_supports(bundle.manifest, "ai_identity"):
+            print("  Active memory backend does not support AI identity management.\n")
+            return
+        mgr = bundle.manager
         mgr.get_or_create(session_key)
     except Exception as e:
-        print(f"  Honcho connection failed: {e}\n")
+        print(f"  {backend_label} identity command failed: {e}\n")
         return
 
-    if show:
-        # ── User peer ────────────────────────────────────────────────────────
-        user_card = mgr.get_peer_card(session_key)
-        print(f"\nUser peer ({hcfg.peer_name or 'not set'})\n" + "─" * 40)
-        if user_card:
-            for fact in user_card:
-                print(f"  {fact}")
+    try:
+        if show:
+            # ── User peer ────────────────────────────────────────────────────
+            print(f"\nUser peer ({hcfg.peer_name or 'not set'})\n" + "─" * 40)
+            if _memory_backend_supports(bundle.manifest, "profile"):
+                user_card = mgr.get_peer_card(session_key)
+                if isinstance(user_card, str):
+                    user_card_lines = [user_card] if user_card else []
+                elif user_card:
+                    user_card_lines = [str(fact) for fact in user_card]
+                else:
+                    user_card_lines = []
+                if user_card_lines:
+                    for fact in user_card_lines:
+                        print(f"  {fact}")
+                else:
+                    print("  No user peer card yet. Send a few messages to build one.")
+            else:
+                print("  Profile view is not supported by the active memory backend.")
+
+            # ── AI peer ──────────────────────────────────────────────────────
+            ai_rep = mgr.get_ai_representation(session_key)
+            print(f"\nAI peer ({hcfg.ai_peer})\n" + "─" * 40)
+            if ai_rep.get("representation"):
+                print(ai_rep["representation"])
+            elif ai_rep.get("card"):
+                print(ai_rep["card"])
+            else:
+                print("  No representation built yet.")
+                print("  Run 'hermes honcho identity <file>' to seed one.")
+            print()
+            return
+
+        if not file_path:
+            print("\nHoncho identity management\n" + "─" * 40)
+            print(f"  User peer: {hcfg.peer_name or 'not set'}")
+            print(f"  AI peer:   {hcfg.ai_peer}")
+            print()
+            print("    hermes honcho identity --show        — show both peer representations")
+            print("    hermes honcho identity <file>        — seed AI peer from SOUL.md or any .md/.txt\n")
+            return
+
+        from pathlib import Path
+        p = Path(file_path).expanduser()
+        if not p.exists():
+            print(f"  File not found: {p}\n")
+            return
+
+        content = p.read_text(encoding="utf-8").strip()
+        if not content:
+            print(f"  File is empty: {p}\n")
+            return
+
+        source = p.name
+        ok = mgr.seed_ai_identity(session_key, content, source=source)
+        if ok:
+            print(f"  Seeded AI peer identity from {p.name} into session '{session_key}'")
+            print(f"  Honcho will incorporate this into {hcfg.ai_peer}'s representation over time.\n")
         else:
-            print("  No user peer card yet. Send a few messages to build one.")
-
-        # ── AI peer ──────────────────────────────────────────────────────────
-        ai_rep = mgr.get_ai_representation(session_key)
-        print(f"\nAI peer ({hcfg.ai_peer})\n" + "─" * 40)
-        if ai_rep.get("representation"):
-            print(ai_rep["representation"])
-        elif ai_rep.get("card"):
-            print(ai_rep["card"])
-        else:
-            print("  No representation built yet.")
-            print("  Run 'hermes honcho identity <file>' to seed one.")
-        print()
-        return
-
-    if not file_path:
-        print("\nHoncho identity management\n" + "─" * 40)
-        print(f"  User peer: {hcfg.peer_name or 'not set'}")
-        print(f"  AI peer:   {hcfg.ai_peer}")
-        print()
-        print("    hermes honcho identity --show        — show both peer representations")
-        print("    hermes honcho identity <file>        — seed AI peer from SOUL.md or any .md/.txt\n")
-        return
-
-    from pathlib import Path
-    p = Path(file_path).expanduser()
-    if not p.exists():
-        print(f"  File not found: {p}\n")
-        return
-
-    content = p.read_text(encoding="utf-8").strip()
-    if not content:
-        print(f"  File is empty: {p}\n")
-        return
-
-    source = p.name
-    ok = mgr.seed_ai_identity(session_key, content, source=source)
-    if ok:
-        print(f"  Seeded AI peer identity from {p.name} into session '{session_key}'")
-        print(f"  Honcho will incorporate this into {hcfg.ai_peer}'s representation over time.\n")
-    else:
-        print(f"  Failed to seed identity. Check logs for details.\n")
+            print(f"  Failed to seed identity. Check logs for details.\n")
+    except Exception as e:
+        print(f"  {backend_label} identity command failed: {e}\n")
 
 
 def cmd_migrate(args) -> None:
     """Step-by-step migration guide: OpenClaw native memory → Hermes + Honcho."""
     from pathlib import Path
+    from honcho_integration.client import HonchoClientConfig
 
     # ── Detect OpenClaw native memory files ──────────────────────────────────
     cwd = Path(os.getcwd())
@@ -538,7 +729,34 @@ def cmd_migrate(args) -> None:
                 agent_files.append(p)
 
     cfg = _read_config()
-    has_key = bool(_resolve_api_key(cfg))
+    resolved_api_key = _resolve_api_key(cfg)
+    has_key = bool(resolved_api_key)
+    resolved_cfg = HonchoClientConfig.from_global_config()
+    backend_cfg = None
+    backend_bundle = None
+    backend_session_key = None
+    backend_error = None
+    try:
+        backend_cfg, backend_bundle, backend_session_key = _load_cli_memory_backend(
+            require_manager=True
+        )
+    except Exception as exc:
+        backend_error = str(exc)
+    backend_ready = backend_bundle is not None and backend_bundle.manager is not None
+    external_backend_requested = bool(
+        getattr(resolved_cfg, "memory_backend_factory", None)
+    )
+    external_backend_active = (
+        backend_ready
+        and _is_external_backend_selected(backend_cfg, backend_bundle)
+    )
+
+    def _backend_ready_for(capability: str) -> bool:
+        return (
+            backend_bundle is not None
+            and backend_bundle.manager is not None
+            and _memory_backend_supports(backend_bundle.manifest, capability)
+        )
 
     print("\nHoncho migration: OpenClaw native memory → Hermes\n" + "─" * 50)
     print()
@@ -552,8 +770,20 @@ def cmd_migrate(args) -> None:
     # ── Step 1: Honcho account ────────────────────────────────────────────────
     print("Step 1  Create a Honcho account")
     print()
-    if has_key:
-        masked = f"...{cfg['apiKey'][-8:]}" if len(cfg["apiKey"]) > 8 else "set"
+    if (
+        backend_bundle is not None
+        and backend_bundle.manager is not None
+        and _is_external_backend_selected(backend_cfg, backend_bundle)
+    ):
+        print("  External memory backend is already active.")
+        print("  Skip to Step 2.")
+    elif external_backend_requested:
+        print("  External memory backend is configured but not active.")
+        if backend_error:
+            print(f"  {backend_error}")
+        print("  Fix the external backend and re-run this walkthrough.")
+    elif has_key:
+        masked = f"...{resolved_api_key[-8:]}" if len(resolved_api_key) > 8 else "set"
         print(f"  Honcho API key already configured: {masked}")
         print("  Skip to Step 2.")
     else:
@@ -609,22 +839,12 @@ def cmd_migrate(args) -> None:
         print("  If you want to migrate them now without starting a session:")
         for f in user_files:
             print(f"    hermes honcho migrate  — this step handles it interactively")
-        if has_key:
+        if _backend_ready_for("migrate"):
             answer = _prompt("  Upload user memory files to Honcho now?", default="y")
             if answer.lower() in ("y", "yes"):
                 try:
-                    from honcho_integration.client import (
-                        HonchoClientConfig,
-                        get_honcho_client,
-                        reset_honcho_client,
-                    )
-                    from honcho_integration.session import HonchoSessionManager
-
-                    reset_honcho_client()
-                    hcfg = HonchoClientConfig.from_global_config()
-                    client = get_honcho_client(hcfg)
-                    mgr = HonchoSessionManager(honcho=client, config=hcfg)
-                    session_key = hcfg.resolve_session_name()
+                    mgr = backend_bundle.manager
+                    session_key = backend_session_key
                     mgr.get_or_create(session_key)
                     # Upload from each directory that had user files
                     dirs_with_files = set(str(f.parent) for f in user_files)
@@ -638,8 +858,11 @@ def cmd_migrate(args) -> None:
                         print("  Nothing uploaded (files may already be migrated or empty).")
                 except Exception as e:
                     print(f"  Failed: {e}")
+        elif backend_bundle is not None and backend_bundle.manager is not None:
+            print("  Active memory backend does not support file migration.")
         else:
-            print("  Run 'hermes honcho setup' first, then re-run this step.")
+            fallback_message = backend_error or "Run 'hermes honcho setup' first, then re-run this step."
+            print(f"  {fallback_message}")
     else:
         print("  No user memory files detected. Nothing to migrate here.")
 
@@ -659,22 +882,12 @@ def cmd_migrate(args) -> None:
     if agent_files:
         print(f"  Found: {', '.join(f.name for f in agent_files)}")
         print()
-        if has_key:
+        if _backend_ready_for("ai_identity"):
             answer = _prompt("  Seed AI identity from all detected files now?", default="y")
             if answer.lower() in ("y", "yes"):
                 try:
-                    from honcho_integration.client import (
-                        HonchoClientConfig,
-                        get_honcho_client,
-                        reset_honcho_client,
-                    )
-                    from honcho_integration.session import HonchoSessionManager
-
-                    reset_honcho_client()
-                    hcfg = HonchoClientConfig.from_global_config()
-                    client = get_honcho_client(hcfg)
-                    mgr = HonchoSessionManager(honcho=client, config=hcfg)
-                    session_key = hcfg.resolve_session_name()
+                    mgr = backend_bundle.manager
+                    session_key = backend_session_key
                     mgr.get_or_create(session_key)
                     for f in agent_files:
                         content = f.read_text(encoding="utf-8").strip()
@@ -684,8 +897,14 @@ def cmd_migrate(args) -> None:
                             print(f"    {f.name}: {status}")
                 except Exception as e:
                     print(f"  Failed: {e}")
+        elif backend_bundle is not None and backend_bundle.manager is not None:
+            print("  Active memory backend does not support AI identity seeding.")
         else:
-            print("  Run 'hermes honcho setup' first, then seed manually:")
+            if backend_error:
+                print(f"  {backend_error}")
+                print("  If you prefer, fix the active memory backend and rerun this step.")
+            else:
+                print("  Run 'hermes honcho setup' first, then seed manually:")
             for f in agent_files:
                 print(f"    hermes honcho identity {f}")
     else:
@@ -711,11 +930,13 @@ def cmd_migrate(args) -> None:
     print("    Hermes:   Honcho observes every message and updates representations")
     print("              automatically. Files become the seed, not the live store.")
     print()
-    print("  Honcho tools (available to the agent during conversation)")
-    print("    honcho_context   — ask Honcho a question, get a synthesized answer (LLM)")
-    print("    honcho_search        — semantic search over stored context (no LLM)")
-    print("    honcho_profile       — fast peer card snapshot (no LLM)")
-    print("    honcho_conclude      — write a conclusion/fact back to memory (no LLM)")
+    print("  Memory tools (available to the agent during conversation)")
+    tool_lines = _memory_backend_tool_lines(backend_bundle if backend_ready else None)
+    if tool_lines:
+        for line in tool_lines:
+            print(line)
+    else:
+        print("    No conversation memory tools are exposed by the active backend.")
     print()
     print("  Session naming")
     print("    OpenClaw: no persistent session concept — files are global.")
@@ -726,16 +947,32 @@ def cmd_migrate(args) -> None:
     print()
     print("Step 6  Next steps")
     print()
-    if not has_key:
+    if backend_ready:
+        if external_backend_active:
+            print("  1. hermes honcho status             — inspect the active backend + capabilities")
+            print("  2. hermes                           — start a session")
+            print("     (user memory files auto-uploaded on first turn if not done above)")
+            if _backend_ready_for("ai_identity"):
+                print("  3. hermes honcho identity --show    — verify AI peer representation")
+        else:
+            print("  1. hermes honcho status             — verify Honcho connection")
+            print("  2. hermes                           — start a session")
+            print("     (user memory files auto-uploaded on first turn if not done above)")
+            if _backend_ready_for("ai_identity"):
+                print("  3. hermes honcho identity --show    — verify AI peer representation")
+            print("  4. hermes honcho tokens             — tune context and dialectic budgets")
+            print("  5. hermes honcho mode               — view or change memory mode")
+    elif external_backend_requested:
+        print("  1. hermes honcho status             — inspect the current backend state")
+        print("  2. fix the memory backend issue shown above")
+        print("  3. hermes honcho migrate            — re-run this walkthrough")
+    elif not has_key:
         print("  1. hermes honcho setup              — configure API key (required)")
         print("  2. hermes honcho migrate            — re-run this walkthrough")
     else:
-        print("  1. hermes honcho status             — verify Honcho connection")
-        print("  2. hermes                           — start a session")
-        print("     (user memory files auto-uploaded on first turn if not done above)")
-        print("  3. hermes honcho identity --show    — verify AI peer representation")
-        print("  4. hermes honcho tokens             — tune context and dialectic budgets")
-        print("  5. hermes honcho mode               — view or change memory mode")
+        print("  1. hermes honcho status             — inspect the current backend connection")
+        print("  2. fix the memory backend issue shown above")
+        print("  3. hermes honcho migrate            — re-run this walkthrough")
     print()
 
 

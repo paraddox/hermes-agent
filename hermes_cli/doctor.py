@@ -61,7 +61,7 @@ def _honcho_is_configured_for_doctor() -> bool:
         from honcho_integration.client import HonchoClientConfig
 
         cfg = HonchoClientConfig.from_global_config()
-        return bool(cfg.enabled and cfg.api_key)
+        return bool(cfg.enabled and (getattr(cfg, "api_key", None) or getattr(cfg, "memory_backend_factory", None)))
     except Exception:
         return False
 
@@ -126,6 +126,94 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
         issues.append("Enable linger for the gateway user service: sudo loginctl enable-linger $USER")
     else:
         check_warn("Could not verify systemd linger", f"({linger_detail})")
+
+
+def _memory_backend_doctor_status() -> tuple[str, str, str, str | None]:
+    """Describe the active memory-backend state for doctor output."""
+    try:
+        from honcho_integration.client import HonchoClientConfig, GLOBAL_CONFIG_PATH
+        from memory_backends.factory import load_memory_backend
+    except ImportError:
+        return ("warn", "honcho-ai not installed", "pip install honcho-ai", None)
+
+    hcfg = HonchoClientConfig.from_global_config()
+    if (
+        not GLOBAL_CONFIG_PATH.exists()
+        and not getattr(hcfg, "api_key", None)
+        and not getattr(hcfg, "memory_backend_factory", None)
+    ):
+        return ("warn", "Honcho config not found", "run: hermes honcho setup", None)
+    if getattr(hcfg, "memory_backend_factory", None) and not hcfg.enabled:
+        return (
+            "info",
+            "External memory backend disabled",
+            "set enabled: true in ~/.honcho/config.json to activate",
+            None,
+        )
+    if not hcfg.enabled:
+        return (
+            "info",
+            "Honcho disabled (set enabled: true in ~/.honcho/config.json to activate)",
+            "",
+            None,
+        )
+
+    if getattr(hcfg, "memory_backend_factory", None):
+        try:
+            bundle = load_memory_backend()
+        except Exception as exc:
+            return (
+                "fail",
+                "External memory backend failed",
+                str(exc),
+                f"External memory backend failed: {exc}",
+            )
+
+        caps = ",".join(sorted(bundle.manifest.capabilities)) or "none"
+        if getattr(bundle.config, "enabled", False) and bundle.manager is not None:
+            return (
+                "ok",
+                "External memory backend active",
+                f"{bundle.manifest.backend_id} caps={caps}",
+                None,
+            )
+
+        reason = "disabled" if not getattr(bundle.config, "enabled", False) else "inactive"
+        return (
+            "warn",
+            "External memory backend not active",
+            f"{bundle.manifest.backend_id} ({reason}) caps={caps}",
+            None,
+        )
+
+    if not hcfg.api_key:
+        return (
+            "fail",
+            "Honcho API key not set",
+            "run: hermes honcho setup",
+            "No Honcho API key — run 'hermes honcho setup'",
+        )
+
+    try:
+        bundle = load_memory_backend()
+    except Exception as exc:
+        return (
+            "fail",
+            "Honcho connection failed",
+            str(exc),
+            f"Honcho unreachable: {exc}",
+        )
+
+    caps = ",".join(sorted(bundle.manifest.capabilities)) or "none"
+    detail = (
+        f"workspace={bundle.config.workspace_id} "
+        f"mode={bundle.config.memory_mode} "
+        f"freq={bundle.config.write_frequency} "
+        f"caps={caps}"
+    )
+    if bundle.manager is None:
+        return ("warn", "Honcho not active", detail, None)
+    return ("ok", "Honcho connected", detail, None)
 
 
 def run_doctor(args):
@@ -717,30 +805,17 @@ def run_doctor(args):
     print(color("◆ Honcho Memory", Colors.CYAN, Colors.BOLD))
 
     try:
-        from honcho_integration.client import HonchoClientConfig, GLOBAL_CONFIG_PATH
-        hcfg = HonchoClientConfig.from_global_config()
-
-        if not GLOBAL_CONFIG_PATH.exists():
-            check_warn("Honcho config not found", f"run: hermes honcho setup")
-        elif not hcfg.enabled:
-            check_info("Honcho disabled (set enabled: true in ~/.honcho/config.json to activate)")
-        elif not hcfg.api_key:
-            check_fail("Honcho API key not set", "run: hermes honcho setup")
-            issues.append("No Honcho API key — run 'hermes honcho setup'")
+        level, text, detail, issue = _memory_backend_doctor_status()
+        if level == "ok":
+            check_ok(text, detail)
+        elif level == "warn":
+            check_warn(text, detail)
+        elif level == "fail":
+            check_fail(text, detail)
+            if issue:
+                issues.append(issue)
         else:
-            from honcho_integration.client import get_honcho_client, reset_honcho_client
-            reset_honcho_client()
-            try:
-                get_honcho_client(hcfg)
-                check_ok(
-                    "Honcho connected",
-                    f"workspace={hcfg.workspace_id} mode={hcfg.memory_mode} freq={hcfg.write_frequency}",
-                )
-            except Exception as _e:
-                check_fail("Honcho connection failed", str(_e))
-                issues.append(f"Honcho unreachable: {_e}")
-    except ImportError:
-        check_warn("honcho-ai not installed", "pip install honcho-ai")
+            check_info(" ".join(part for part in (text, detail) if part))
     except Exception as _e:
         check_warn("Honcho check failed", str(_e))
 

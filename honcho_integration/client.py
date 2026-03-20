@@ -67,10 +67,10 @@ class HonchoClientConfig:
 
     host: str = HOST
     workspace_id: str = "hermes"
+    base_url: str | None = None
     api_key: str | None = None
     environment: str = "production"
-    # Optional base URL for self-hosted Honcho (overrides environment mapping)
-    base_url: str | None = None
+    memory_backend_factory: str | None = None
     # Identity
     peer_name: str | None = None
     ai_peer: str = "hermes"
@@ -114,15 +114,23 @@ class HonchoClientConfig:
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_env(cls, workspace_id: str = "hermes") -> HonchoClientConfig:
+    def from_env(
+        cls,
+        *,
+        host: str = HOST,
+        workspace_id: str | None = None,
+    ) -> HonchoClientConfig:
         """Create config from environment variables (fallback)."""
         api_key = os.environ.get("HONCHO_API_KEY")
         base_url = os.environ.get("HONCHO_BASE_URL", "").strip() or None
+        resolved_workspace = workspace_id or host
         return cls(
-            workspace_id=workspace_id,
+            host=host,
+            workspace_id=resolved_workspace,
             api_key=api_key,
             environment=os.environ.get("HONCHO_ENVIRONMENT", "production"),
             base_url=base_url,
+            ai_peer=host,
             enabled=bool(api_key or base_url),
         )
 
@@ -139,13 +147,13 @@ class HonchoClientConfig:
         path = config_path or GLOBAL_CONFIG_PATH
         if not path.exists():
             logger.debug("No global Honcho config at %s, falling back to env", path)
-            return cls.from_env()
+            return cls.from_env(host=host)
 
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to read %s: %s, falling back to env", path, e)
-            return cls.from_env()
+            return cls.from_env(host=host)
 
         host_block = (raw.get("hosts") or {}).get(host, {})
 
@@ -172,6 +180,8 @@ class HonchoClientConfig:
             host_block.get("environment")
             or raw.get("environment", "production")
         )
+        experimental = host_block.get("experimental") or {}
+        memory_backend_factory = experimental.get("memory_backend_factory")
 
         base_url = (
             raw.get("baseUrl")
@@ -188,8 +198,9 @@ class HonchoClientConfig:
         elif root_enabled is not None:
             enabled = root_enabled
         else:
-            # Not explicitly set anywhere -> auto-enable if API key or base_url exists
-            enabled = bool(api_key or base_url)
+            # Not explicitly set anywhere -> auto-enable if API key, local base_url,
+            # or an external backend factory is configured.
+            enabled = bool(api_key or base_url or memory_backend_factory)
 
         # write_frequency: accept int or string
         raw_wf = (
@@ -223,6 +234,7 @@ class HonchoClientConfig:
             api_key=api_key,
             environment=environment,
             base_url=base_url,
+            memory_backend_factory=memory_backend_factory,
             peer_name=host_block.get("peerName") or raw.get("peerName"),
             ai_peer=ai_peer,
             linked_hosts=linked_hosts,

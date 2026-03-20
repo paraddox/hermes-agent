@@ -85,6 +85,50 @@ class TestHonchoClientConfigAutoEnable:
         assert cfg.api_key == "env-api-key-67890"
         assert cfg.enabled is True  # Auto-enabled from env var API key
 
+    def test_auto_enables_when_external_backend_factory_is_configured(self, tmp_path):
+        """External backend hook should enable memory even without a Honcho API key."""
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "hosts": {
+                        "hermes": {
+                            "experimental": {
+                                "memory_backend_factory": "tests.fakes.fake_memory_backend:create_backend"
+                            }
+                        }
+                    }
+                }
+            )
+        )
+
+        cfg = HonchoClientConfig.from_global_config(config_path=config_path)
+
+        assert cfg.enabled is True
+        assert cfg.memory_backend_factory == "tests.fakes.fake_memory_backend:create_backend"
+
+    def test_external_backend_factory_is_host_scoped(self, tmp_path):
+        """Root-level experimental hooks must not override other hosts."""
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "experimental": {
+                        "memory_backend_factory": "tests.fakes.fake_memory_backend:create_backend"
+                    },
+                    "hosts": {
+                        "telegram": {
+                            "enabled": True,
+                        }
+                    },
+                }
+            )
+        )
+
+        cfg = HonchoClientConfig.from_global_config(host="telegram", config_path=config_path)
+
+        assert cfg.memory_backend_factory is None
+
     def test_from_env_always_enabled(self, monkeypatch):
         """from_env() should always set enabled=True."""
         monkeypatch.setenv("HONCHO_API_KEY", "env-test-key")

@@ -16,9 +16,15 @@ This document maps those tradeoffs and defines a porting spec: a set of Hermes-o
 
 ## Architecture comparison
 
-### Hermes: baked-in runner
+### Hermes: runner-owned memory backend
 
-Honcho is initialised directly inside `AIAgent.__init__`. There is no plugin boundary. Session management, context injection, async prefetch, and CLI surface are all first-class concerns of the runner. Context is injected once per session (baked into `_cached_system_prompt`) and never re-fetched mid-session — this maximises prefix cache hits at the LLM provider.
+Hermes still treats memory as a runner concern, not a tool plugin, but it now
+has a small backend seam. Honcho remains the only built-in backend. An
+experimental external backend factory can replace it out of tree. Session
+management, context injection, async prefetch, and CLI surface are still
+first-class concerns of the runner. Context is injected once per session
+(baked into `_cached_system_prompt`) and never re-fetched mid-session — this
+maximises prefix cache hits at the LLM provider.
 
 Turn flow:
 
@@ -28,7 +34,7 @@ user message
   → _build_system_prompt()   (first turn only, cached)
   → LLM call
   → response
-  → _honcho_fire_prefetch()  (daemon threads, turn end)
+  → _queue_honcho_prefetch() (daemon threads, turn end)
        → prefetch_context() thread  ──┐
        → prefetch_dialectic() thread ─┴→ _context_cache / _dialectic_cache
 ```
@@ -61,7 +67,7 @@ user message
 | **Prefetch strategy** | Daemon threads fire at turn end; consumed next turn from cache. | None. Blocking call at prompt-build time. |
 | **Dialectic (peer.chat)** | Prefetched async; result injected into system prompt next turn. | On-demand via `honcho_recall` / `honcho_analyze` tools. |
 | **Reasoning level** | Dynamic: scales with message length. Floor = config default. Cap = "high". | Fixed per tool: recall=minimal, analyze=medium. |
-| **Memory modes** | `user_memory_mode` / `agent_memory_mode`: hybrid / honcho / local. | None. Always writes to Honcho. |
+| **Memory modes** | Peer-scoped `memoryMode` overrides: hybrid / honcho. | None. Always writes to Honcho. |
 | **Write frequency** | async (background queue), turn, session, N turns. | After every agent_end (no control). |
 | **AI peer identity** | `observe_me=True`, `seed_ai_identity()`, `get_ai_representation()`, SOUL.md → AI peer. | Agent files uploaded to agent peer at setup. No ongoing self-observation. |
 | **Context scope** | User peer + AI peer representation, both injected. | User peer (owner) representation + conversation summary. `peerPerspective` on context call. |
@@ -174,7 +180,8 @@ Apply in `honcho_recall` and `honcho_analyze`: replace fixed `reasoningLevel` wi
 
 ### Problem
 
-Users want independent control over whether user context and agent context are written locally, to Honcho, or both.
+Users want independent control over whether each peer writes locally, to Honcho,
+or both, without growing a separate config field for every peer.
 
 ### Modes
 
@@ -182,27 +189,31 @@ Users want independent control over whether user context and agent context are w
 |---|---|
 | `hybrid` | Write to both local files and Honcho (default) |
 | `honcho` | Honcho only — disable corresponding local file writes |
-| `local` | Local files only — skip Honcho sync for this peer |
 
 ### Config schema
 
 ```json
 {
-  "memoryMode": "hybrid",
-  "userMemoryMode": "honcho",
-  "agentMemoryMode": "hybrid"
+  "memoryMode": {
+    "default": "hybrid",
+    "hermes": "honcho"
+  }
 }
 ```
 
-Resolution order: per-peer field wins → shorthand `memoryMode` → default `"hybrid"`.
+Resolution order: named peer override inside `memoryMode` wins → `default`
+inside `memoryMode` → shorthand string `memoryMode` → hardcoded default
+`"hybrid"`.
 
 ### Effect on Honcho sync
 
-- `userMemoryMode=local`: skip adding user peer messages to Honcho
-- `agentMemoryMode=local`: skip adding assistant peer messages to Honcho
-- Both local: skip `session.addMessages()` entirely
-- `userMemoryMode=honcho`: disable local USER.md writes
-- `agentMemoryMode=honcho`: disable local MEMORY.md / SOUL.md writes
+- `memoryMode={"hermes":"honcho"}`: disable local MEMORY.md / SOUL.md writes
+  for the AI peer while keeping Honcho sync active
+- `memoryMode={"alice":"honcho"}`: disable local USER.md writes for the named
+  user peer while keeping Honcho sync active
+- `hybrid`: keep both local writes and Honcho sync active
+
+Hermes does not currently expose a `local`-only peer mode.
 
 ---
 
@@ -321,12 +332,12 @@ When Honcho is active, append a compact command reference to the system prompt. 
 # Honcho memory integration
 Active. Session: {sessionKey}. Mode: {mode}.
 Management commands:
-  honcho status                    — show config + connection
-  honcho mode [hybrid|honcho|local] — show or set memory mode
-  honcho sessions                  — list session mappings
-  honcho map <name>                — map directory to session
-  honcho identity [file] [--show]  — seed or show AI identity
-  honcho setup                     — full interactive wizard
+  hermes honcho status                    — show full config + connection
+  hermes honcho mode [hybrid|honcho]       — show or set memory mode
+  hermes honcho sessions                  — list directory→session mappings
+  hermes honcho map <name>                — map cwd to a session name
+  hermes honcho identity [<file>] [--show] — seed or show AI peer identity
+  hermes honcho setup                     — full interactive wizard
 ```
 
 ---
@@ -338,7 +349,7 @@ Ordered by impact:
 - [ ] **Async prefetch** — move `session.context()` out of `before_prompt_build` into post-`agent_end` background Promise
 - [ ] **observe_me=True for agent peer** — one-line change in `session.addPeers()`
 - [ ] **Dynamic reasoning level** — add helper; apply in `honcho_recall` and `honcho_analyze`; add `dialecticReasoningLevel` to config
-- [ ] **Per-peer memory modes** — add `userMemoryMode` / `agentMemoryMode` to config; gate Honcho sync and local writes
+- [ ] **Per-peer memory modes** — add peer-scoped `memoryMode` overrides; gate Honcho sync and local writes
 - [ ] **seedAiIdentity()** — add helper; use during setup migration for SOUL.md / IDENTITY.md
 - [ ] **Session naming strategies** — add `sessionStrategy`, `sessions` map, `sessionPeerPrefix`
 - [ ] **CLI surface injection** — append command reference to `before_prompt_build` return value
@@ -364,7 +375,7 @@ Greenfield integration. Start from openclaw-honcho's architecture and apply all 
 
 ### Phase 2 — configuration
 
-- [ ] Config schema: `apiKey`, `workspaceId`, `baseUrl`, `memoryMode`, `userMemoryMode`, `agentMemoryMode`, `dialecticReasoningLevel`, `sessionStrategy`, `sessions`
+- [ ] Config schema: `apiKey`, `workspaceId`, `baseUrl`, `memoryMode` (string or peer-keyed object), `dialecticReasoningLevel`, `sessionStrategy`, `sessions`
 - [ ] Per-peer memory mode gating
 - [ ] Dynamic reasoning level
 - [ ] Session naming strategies
