@@ -972,7 +972,7 @@ def _model_flow_openrouter(config, current_model=""):
         _save_model_choice(selected)
 
         # Update config provider and deactivate any OAuth provider
-        from hermes_cli.config import load_config, save_config
+        from hermes_cli.config import load_config, save_user_config as save_config
         cfg = load_config()
         model = cfg.get("model")
         if not isinstance(model, dict):
@@ -1120,7 +1120,12 @@ def _model_flow_custom(config):
     so it appears in the provider menu on subsequent runs.
     """
     from hermes_cli.auth import _save_model_choice, deactivate_provider
-    from hermes_cli.config import get_env_value, save_env_value, load_config, save_config
+    from hermes_cli.config import (
+        get_env_value,
+        save_env_value,
+        load_config,
+        save_user_config as save_config,
+    )
 
     current_url = get_env_value("OPENAI_BASE_URL") or ""
     current_key = get_env_value("OPENAI_API_KEY") or ""
@@ -1223,7 +1228,7 @@ def _save_custom_provider(base_url, api_key="", model="", context_length=None):
     model name and context_length but doesn't add a duplicate entry.
     Auto-generates a display name from the URL hostname.
     """
-    from hermes_cli.config import load_config, save_config
+    from hermes_cli.config import load_config, save_user_config as save_config
 
     cfg = load_config()
     providers = cfg.get("custom_providers") or []
@@ -1280,7 +1285,7 @@ def _save_custom_provider(base_url, api_key="", model="", context_length=None):
 
 def _remove_custom_provider(config):
     """Let the user remove a saved custom provider from config.yaml."""
-    from hermes_cli.config import load_config, save_config
+    from hermes_cli.config import load_config, save_user_config as save_config
 
     cfg = load_config()
     providers = cfg.get("custom_providers") or []
@@ -1340,7 +1345,11 @@ def _model_flow_named_custom(config, provider_info):
     Otherwise probes the endpoint's /models API to let the user pick one.
     """
     from hermes_cli.auth import _save_model_choice, deactivate_provider
-    from hermes_cli.config import save_env_value, load_config, save_config
+    from hermes_cli.config import (
+        save_env_value,
+        load_config,
+        save_user_config as save_config,
+    )
     from hermes_cli.models import fetch_api_models
 
     name = provider_info["name"]
@@ -1621,7 +1630,12 @@ def _model_flow_copilot(config, current_model=""):
         deactivate_provider,
         resolve_api_key_provider_credentials,
     )
-    from hermes_cli.config import get_env_value, save_env_value, load_config, save_config
+    from hermes_cli.config import (
+        get_env_value,
+        save_env_value,
+        load_config,
+        save_user_config as save_config,
+    )
     from hermes_cli.models import (
         fetch_api_models,
         fetch_github_model_catalog,
@@ -1803,7 +1817,7 @@ def _model_flow_copilot_acp(config, current_model=""):
         fetch_github_model_catalog,
         normalize_copilot_model_id,
     )
-    from hermes_cli.config import load_config, save_config
+    from hermes_cli.config import load_config, save_user_config as save_config
 
     del config
 
@@ -1901,7 +1915,12 @@ def _model_flow_kimi(config, current_model=""):
         PROVIDER_REGISTRY, KIMI_CODE_BASE_URL, _prompt_model_selection,
         _save_model_choice, deactivate_provider,
     )
-    from hermes_cli.config import get_env_value, save_env_value, load_config, save_config
+    from hermes_cli.config import (
+        get_env_value,
+        save_env_value,
+        load_config,
+        save_user_config as save_config,
+    )
 
     provider_id = "kimi-coding"
     pconfig = PROVIDER_REGISTRY[provider_id]
@@ -1999,7 +2018,12 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
         PROVIDER_REGISTRY, _prompt_model_selection, _save_model_choice,
         deactivate_provider,
     )
-    from hermes_cli.config import get_env_value, save_env_value, load_config, save_config
+    from hermes_cli.config import (
+        get_env_value,
+        save_env_value,
+        load_config,
+        save_user_config as save_config,
+    )
 
     pconfig = PROVIDER_REGISTRY[provider_id]
     key_env = pconfig.api_key_env_vars[0] if pconfig.api_key_env_vars else ""
@@ -2190,7 +2214,10 @@ def _model_flow_anthropic(config, current_model=""):
         deactivate_provider,
     )
     from hermes_cli.config import (
-        get_env_value, save_env_value, load_config, save_config,
+        get_env_value,
+        save_env_value,
+        load_config,
+        save_user_config as save_config,
         save_anthropic_api_key,
     )
     from hermes_cli.models import _PROVIDER_MODELS

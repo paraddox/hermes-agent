@@ -1,8 +1,9 @@
 import json
+import yaml
 
-from hermes_cli.auth import _update_config_for_provider, get_active_provider
-from hermes_cli.config import load_config, save_config
-from hermes_cli.setup import setup_model_provider
+from hermes_cli.auth import _reset_config_provider, _update_config_for_provider, get_active_provider
+from hermes_cli.config import get_config_path, load_config, save_config
+from hermes_cli.setup import setup_agent_settings, setup_model_provider
 
 
 def _maybe_keep_current_tts(question, choices):
@@ -176,3 +177,99 @@ def test_codex_setup_uses_runtime_access_token_for_live_model_list(tmp_path, mon
     assert reloaded["model"]["provider"] == "openai-codex"
     assert reloaded["model"]["default"] == "gpt-5.2-codex"
     assert reloaded["model"]["base_url"] == "https://chatgpt.com/backend-api/codex"
+
+
+def test_setup_agent_settings_preserves_raw_user_config_without_enabling_defaults(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    config_path = get_config_path()
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "_config_version": 10,
+                "compression": {"threshold": 0.8, "enabled": False},
+                "custom_section": {"keep": True},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config()
+
+    prompt_values = iter(["90", "all", "0.8"])
+
+    monkeypatch.setattr(
+        "hermes_cli.setup.prompt",
+        lambda *args, **kwargs: next(prompt_values),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.setup.prompt_choice",
+        lambda question, choices, default=0: 4 if question == "Session reset mode:" else default,
+    )
+
+    setup_agent_settings(config)
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["compression"]["threshold"] == 0.8
+    assert saved["compression"]["enabled"] is False
+    assert saved["custom_section"] == {"keep": True}
+    assert "browser" not in saved
+
+
+def test_update_config_for_provider_preserves_raw_user_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    config_path = get_config_path()
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "model": "old-model",
+                "compression": {"threshold": 0.8},
+                "custom_section": {"keep": True},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    _update_config_for_provider("nous", "https://inference.example.com/v1")
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["model"]["provider"] == "nous"
+    assert saved["model"]["base_url"] == "https://inference.example.com/v1"
+    assert saved["model"]["default"] == "old-model"
+    assert saved["compression"]["threshold"] == 0.8
+    assert saved["custom_section"] == {"keep": True}
+    assert "browser" not in saved
+
+
+def test_reset_config_provider_preserves_raw_user_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    config_path = get_config_path()
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "provider": "nous",
+                    "base_url": "https://inference.example.com/v1",
+                    "default": "gemini-3-flash",
+                },
+                "custom_section": {"keep": True},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    _reset_config_provider()
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["model"]["provider"] == "auto"
+    assert saved["model"]["base_url"] == "https://openrouter.ai/api/v1"
+    assert saved["model"]["default"] == "gemini-3-flash"
+    assert saved["custom_section"] == {"keep": True}
+    assert "browser" not in saved

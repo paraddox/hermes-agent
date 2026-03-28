@@ -275,6 +275,42 @@ def _load_gateway_config() -> dict:
     return {}
 
 
+def _load_gateway_raw_config() -> dict:
+    """Load the raw gateway config.yaml without merging defaults."""
+    try:
+        from hermes_cli.config import load_raw_config
+
+        return load_raw_config(config_path=_hermes_home / "config.yaml")
+    except Exception:
+        logger.debug("Could not load raw gateway config from %s", _hermes_home / "config.yaml")
+        return {}
+
+
+def _save_gateway_user_config(config: dict) -> None:
+    """Save raw gateway config through the shared user-config writer."""
+    from hermes_cli.config import save_user_config
+
+    save_user_config(config, config_path=_hermes_home / "config.yaml")
+
+
+def _save_gateway_config_key(key_path: str, value) -> bool:
+    """Save a dot-separated key to gateway config using the shared writer."""
+    try:
+        user_config = _load_gateway_raw_config()
+        keys = key_path.split(".")
+        current = user_config
+        for key in keys[:-1]:
+            if key not in current or not isinstance(current.get(key), dict):
+                current[key] = {}
+            current = current[key]
+        current[keys[-1]] = value
+        _save_gateway_user_config(user_config)
+        return True
+    except Exception as e:
+        logger.error("Failed to save config key %s: %s", key_path, e)
+        return False
+
+
 def _resolve_gateway_model(config: dict | None = None) -> str:
     """Read model from env/config — mirrors the resolution in _run_agent_sync.
 
@@ -3041,19 +3077,11 @@ class GatewayRunner:
     
     async def _handle_personality_command(self, event: MessageEvent) -> str:
         """Handle /personality command - list or set a personality."""
-        import yaml
-
         args = event.get_command_args().strip().lower()
-        config_path = _hermes_home / 'config.yaml'
 
         try:
-            if config_path.exists():
-                with open(config_path, 'r', encoding="utf-8") as f:
-                    config = yaml.safe_load(f) or {}
-                personalities = config.get("agent", {}).get("personalities", {})
-            else:
-                config = {}
-                personalities = {}
+            config = _load_gateway_raw_config()
+            personalities = config.get("agent", {}).get("personalities", {})
         except Exception:
             config = {}
             personalities = {}
@@ -3085,11 +3113,8 @@ class GatewayRunner:
 
         if args in ("none", "default", "neutral"):
             try:
-                if "agent" not in config or not isinstance(config.get("agent"), dict):
-                    config["agent"] = {}
-                config["agent"]["system_prompt"] = ""
-                with open(config_path, "w") as f:
-                    yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+                if not _save_gateway_config_key("agent.system_prompt", ""):
+                    raise RuntimeError("could not save config")
             except Exception as e:
                 return f"⚠️ Failed to save personality change: {e}"
             self._ephemeral_system_prompt = ""
@@ -3097,13 +3122,9 @@ class GatewayRunner:
         elif args in personalities:
             new_prompt = _resolve_prompt(personalities[args])
 
-            # Write to config.yaml, same pattern as CLI save_config_value.
             try:
-                if "agent" not in config or not isinstance(config.get("agent"), dict):
-                    config["agent"] = {}
-                config["agent"]["system_prompt"] = new_prompt
-                with open(config_path, 'w', encoding="utf-8") as f:
-                    yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+                if not _save_gateway_config_key("agent.system_prompt", new_prompt):
+                    raise RuntimeError("could not save config")
             except Exception as e:
                 return f"⚠️ Failed to save personality change: {e}"
 
@@ -3184,17 +3205,9 @@ class GatewayRunner:
         
         env_key = f"{platform_name.upper()}_HOME_CHANNEL"
         
-        # Save to config.yaml
         try:
-            import yaml
-            config_path = _hermes_home / 'config.yaml'
-            user_config = {}
-            if config_path.exists():
-                with open(config_path, encoding="utf-8") as f:
-                    user_config = yaml.safe_load(f) or {}
-            user_config[env_key] = chat_id
-            with open(config_path, 'w', encoding="utf-8") as f:
-                yaml.dump(user_config, f, default_flow_style=False)
+            if not _save_gateway_config_key(env_key, chat_id):
+                raise RuntimeError("could not save config")
             # Also set in the current environment so it takes effect immediately
             os.environ[env_key] = str(chat_id)
         except Exception as e:
@@ -3841,33 +3854,9 @@ class GatewayRunner:
             /reasoning show|on      Show model reasoning in responses
             /reasoning hide|off     Hide model reasoning from responses
         """
-        import yaml
-
         args = event.get_command_args().strip().lower()
-        config_path = _hermes_home / "config.yaml"
         self._reasoning_config = self._load_reasoning_config()
         self._show_reasoning = self._load_show_reasoning()
-
-        def _save_config_key(key_path: str, value):
-            """Save a dot-separated key to config.yaml."""
-            try:
-                user_config = {}
-                if config_path.exists():
-                    with open(config_path, encoding="utf-8") as f:
-                        user_config = yaml.safe_load(f) or {}
-                keys = key_path.split(".")
-                current = user_config
-                for k in keys[:-1]:
-                    if k not in current or not isinstance(current[k], dict):
-                        current[k] = {}
-                    current = current[k]
-                current[keys[-1]] = value
-                with open(config_path, "w", encoding="utf-8") as f:
-                    yaml.dump(user_config, f, default_flow_style=False, sort_keys=False)
-                return True
-            except Exception as e:
-                logger.error("Failed to save config key %s: %s", key_path, e)
-                return False
 
         if not args:
             # Show current state
@@ -3889,12 +3878,12 @@ class GatewayRunner:
         # Display toggle
         if args in ("show", "on"):
             self._show_reasoning = True
-            _save_config_key("display.show_reasoning", True)
+            _save_gateway_config_key("display.show_reasoning", True)
             return "🧠 ✓ Reasoning display: **ON**\nModel thinking will be shown before each response."
 
         if args in ("hide", "off"):
             self._show_reasoning = False
-            _save_config_key("display.show_reasoning", False)
+            _save_gateway_config_key("display.show_reasoning", False)
             return "🧠 ✓ Reasoning display: **OFF**"
 
         # Effort level change
@@ -3911,7 +3900,7 @@ class GatewayRunner:
             )
 
         self._reasoning_config = parsed
-        if _save_config_key("agent.reasoning_effort", effort):
+        if _save_gateway_config_key("agent.reasoning_effort", effort):
             return f"🧠 ✓ Reasoning effort set to `{effort}` (saved to config)\n_(takes effect on next message)_"
         else:
             return f"🧠 ✓ Reasoning effort set to `{effort}` (this session only)"
@@ -3923,16 +3912,9 @@ class GatewayRunner:
         When enabled, cycles the tool progress mode through off → new → all →
         verbose → off, same as the CLI.
         """
-        import yaml
-
-        config_path = _hermes_home / "config.yaml"
-
         # --- check config gate ------------------------------------------------
         try:
-            user_config = {}
-            if config_path.exists():
-                with open(config_path, encoding="utf-8") as f:
-                    user_config = yaml.safe_load(f) or {}
+            user_config = _load_gateway_raw_config()
             gate_enabled = user_config.get("display", {}).get("tool_progress_command", False)
         except Exception:
             gate_enabled = False
@@ -3966,13 +3948,9 @@ class GatewayRunner:
         idx = (cycle.index(current) + 1) % len(cycle)
         new_mode = cycle[idx]
 
-        # Save to config.yaml
         try:
-            if "display" not in user_config or not isinstance(user_config.get("display"), dict):
-                user_config["display"] = {}
-            user_config["display"]["tool_progress"] = new_mode
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(user_config, f, default_flow_style=False, sort_keys=False)
+            if not _save_gateway_config_key("display.tool_progress", new_mode):
+                raise RuntimeError("could not save config")
             return f"{descriptions[new_mode]}\n_(saved to config — takes effect on next message)_"
         except Exception as e:
             logger.warning("Failed to save tool_progress mode: %s", e)

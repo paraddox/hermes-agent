@@ -966,32 +966,42 @@ def save_config_value(key_path: str, value: any) -> bool:
     try:
         # Ensure parent directory exists (for ~/.hermes/config.yaml on first use)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Load existing config
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f) or {}
+
+        if config_path == user_config_path:
+            from hermes_cli.config import load_raw_config, save_user_config
+
+            config = load_raw_config()
+            keys = key_path.split('.')
+            current = config
+            for key in keys[:-1]:
+                if key not in current or not isinstance(current[key], dict):
+                    current[key] = {}
+                current = current[key]
+            current[keys[-1]] = value
+            save_user_config(config)
         else:
-            config = {}
-        
-        # Navigate to the key and set value
-        keys = key_path.split('.')
-        current = config
-        for key in keys[:-1]:
-            if key not in current or not isinstance(current[key], dict):
-                current[key] = {}
-            current = current[key]
-        current[keys[-1]] = value
-        
-        # Save back
-        with open(config_path, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-        
-        # Enforce owner-only permissions on config files (contain API keys)
-        try:
-            os.chmod(config_path, 0o600)
-        except (OSError, NotImplementedError):
-            pass
+            # Project fallback keeps the legacy direct YAML write behavior.
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f) or {}
+            else:
+                config = {}
+
+            keys = key_path.split('.')
+            current = config
+            for key in keys[:-1]:
+                if key not in current or not isinstance(current[key], dict):
+                    current[key] = {}
+                current = current[key]
+            current[keys[-1]] = value
+
+            with open(config_path, 'w') as f:
+                yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+            try:
+                os.chmod(config_path, 0o600)
+            except (OSError, NotImplementedError):
+                pass
         
         return True
     except Exception as e:

@@ -1,5 +1,6 @@
 """Tests for hermes_cli.tools_config platform tool persistence."""
 
+import yaml
 from unittest.mock import patch
 
 from hermes_cli.tools_config import (
@@ -133,6 +134,69 @@ def test_save_platform_tools_handles_invalid_existing_config():
 
     saved_toolsets = config["platform_toolsets"]["cli"]
     assert "web" in saved_toolsets
+
+
+def test_save_platform_tools_preserves_raw_user_config(tmp_path, monkeypatch):
+    """Saving tool selections must not rewrite unrelated defaults into config.yaml."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli.config import load_config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "custom_section": {"keep": True},
+                "compression": {"enabled": False},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config()
+    _save_platform_tools(config, "cli", {"web", "terminal"})
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["custom_section"] == {"keep": True}
+    assert saved["compression"] == {"enabled": False}
+    assert saved["platform_toolsets"]["cli"] == ["terminal", "web"]
+    assert "browser" not in saved
+    assert "display" not in saved
+    assert "terminal" not in saved
+
+
+def test_save_platform_tools_preserves_raw_env_placeholders(tmp_path, monkeypatch):
+    """Saving tool selections must not expand unrelated env placeholders."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("GLM_API_KEY", "secret-key-123")
+
+    from hermes_cli.config import load_config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "mcp_servers": {
+                    "zread": {
+                        "url": "https://example.com",
+                        "headers": {"Authorization": "Bearer ${GLM_API_KEY}"},
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config()
+    _save_platform_tools(config, "cli", {"web", "terminal"})
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert (
+        saved["mcp_servers"]["zread"]["headers"]["Authorization"]
+        == "Bearer ${GLM_API_KEY}"
+    )
 
 
 def test_save_platform_tools_does_not_preserve_platform_default_toolsets():

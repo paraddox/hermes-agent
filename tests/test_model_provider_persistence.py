@@ -10,6 +10,7 @@ import os
 from unittest.mock import patch, MagicMock
 
 import pytest
+import yaml
 
 
 @pytest.fixture
@@ -53,7 +54,6 @@ class TestSaveModelChoiceAlwaysDict:
 
     def test_dict_model_stays_dict(self, config_home):
         """When config.model is already a dict, _save_model_choice preserves it."""
-        import yaml
         (config_home / "config.yaml").write_text(
             "model:\n  default: old-model\n  provider: openrouter\n"
         )
@@ -66,6 +66,113 @@ class TestSaveModelChoiceAlwaysDict:
         assert isinstance(model, dict)
         assert model["default"] == "new-model"
         assert model["provider"] == "openrouter"  # preserved
+
+    def test_save_model_choice_preserves_raw_user_config(self, config_home):
+        """Saving a model choice must not rewrite unrelated defaults into config.yaml."""
+        (config_home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "model": "old-model",
+                    "compression": {"threshold": 0.8, "enabled": False},
+                    "custom_section": {"keep": True},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        from hermes_cli.auth import _save_model_choice
+
+        _save_model_choice("new-model")
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        assert config["model"]["default"] == "new-model"
+        assert config["compression"] == {"threshold": 0.8, "enabled": False}
+        assert config["custom_section"] == {"keep": True}
+        assert "terminal" not in config
+        assert "browser" not in config
+
+    def test_save_model_choice_preserves_raw_env_placeholders(self, config_home, monkeypatch):
+        """Saving a model choice must not expand unrelated env placeholders."""
+        monkeypatch.setenv("GLM_API_KEY", "secret-key-123")
+        (config_home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "model": "old-model",
+                    "mcp_servers": {
+                        "zread": {
+                            "url": "https://example.com",
+                            "headers": {"Authorization": "Bearer ${GLM_API_KEY}"},
+                        }
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        from hermes_cli.auth import _save_model_choice
+
+        _save_model_choice("new-model")
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        assert config["model"]["default"] == "new-model"
+        assert (
+            config["mcp_servers"]["zread"]["headers"]["Authorization"]
+            == "Bearer ${GLM_API_KEY}"
+        )
+
+    def test_model_flow_openrouter_preserves_raw_user_config(self, config_home, monkeypatch):
+        """OpenRouter model selection must not rewrite unrelated defaults."""
+        (config_home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "model": "old-model",
+                    "compression": {"enabled": False},
+                    "custom_section": {"keep": True},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        from hermes_cli.config import load_config
+        from hermes_cli.main import _model_flow_openrouter
+
+        with patch("hermes_cli.models.model_ids", return_value=["new-model"]), patch(
+            "hermes_cli.auth._prompt_model_selection", return_value="new-model"
+        ), patch("hermes_cli.auth.deactivate_provider"):
+            _model_flow_openrouter(load_config(), current_model="old-model")
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        assert config["model"]["default"] == "new-model"
+        assert config["model"]["provider"] == "openrouter"
+        assert config["compression"] == {"enabled": False}
+        assert config["custom_section"] == {"keep": True}
+        assert "terminal" not in config
+
+    def test_save_custom_provider_preserves_raw_user_config(self, config_home):
+        """Saving a named custom provider must not rewrite unrelated defaults."""
+        (config_home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "custom_section": {"keep": True},
+                    "compression": {"enabled": False},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        from hermes_cli.main import _save_custom_provider
+
+        _save_custom_provider("https://example.com/v1", model="my-model", context_length=1234)
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        assert config["custom_section"] == {"keep": True}
+        assert config["compression"] == {"enabled": False}
+        assert config["custom_providers"][0]["base_url"] == "https://example.com/v1"
+        assert config["custom_providers"][0]["model"] == "my-model"
+        assert "terminal" not in config
 
 
 class TestProviderPersistsAfterModelSave:

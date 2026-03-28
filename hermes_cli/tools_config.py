@@ -15,7 +15,10 @@ from typing import Dict, List, Optional, Set
 
 
 from hermes_cli.config import (
-    load_config, save_config, get_env_value, save_env_value,
+    get_env_value,
+    load_config,
+    save_env_value,
+    save_user_config as save_config,
 )
 from hermes_cli.colors import Colors, color
 
@@ -1045,7 +1048,7 @@ def tools_command(args=None, first_install: bool = False, config: dict = None):
             prompt for API keys on all enabled tools that need them.
         config: Optional config dict to use.  When called from the setup
             wizard, the wizard passes its own dict so that platform_toolsets
-            are written into it and survive the wizard's final save_config().
+            are written into it and survive the wizard's final raw-preserving save.
     """
     if config is None:
         config = load_config()
