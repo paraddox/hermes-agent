@@ -284,6 +284,7 @@ from hermes_cli.config import (
     get_config_path,
     get_env_path,
     load_config,
+    load_raw_config,
     save_config,
     save_env_value,
     get_env_value,
@@ -812,6 +813,10 @@ def setup_model_provider(config: dict):
         detect_external_credentials,
         get_auth_status,
         resolve_api_key_provider_credentials,
+    )
+    from hermes_cli.mcp_presets import (
+        configure_provider_mcp_bundle,
+        snapshot_existing_mcp_servers_raw,
     )
 
     print_header("Inference Provider")
@@ -1782,6 +1787,20 @@ def setup_model_provider(config: dict):
                 if custom:
                     _set_default_model(config, custom)
             # else: Keep current
+
+        configure_provider_mcp_bundle(
+            config,
+            selected_provider,
+            existing_mcp_servers_raw=snapshot_existing_mcp_servers_raw(
+                config,
+                raw_config=load_raw_config(),
+            ),
+            prompt_yes_no=prompt_yes_no,
+            prompt_checklist=prompt_checklist,
+            print_warning=print_warning,
+            print_success=print_success,
+            logger=logger,
+        )
 
         _final_model = config.get("model", "")
         if _final_model:

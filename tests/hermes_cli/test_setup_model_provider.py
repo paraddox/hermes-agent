@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import copy
+
 from hermes_cli.config import load_config, save_config, save_env_value
 from hermes_cli.setup import _print_setup_summary, setup_model_provider
+from hermes_cli.mcp_presets import (
+    get_bundle_default_checked_servers,
+    resolve_provider_mcp_bundle,
+)
 
 
 def _maybe_keep_current_tts(question, choices):
@@ -11,6 +17,10 @@ def _maybe_keep_current_tts(question, choices):
         return None
     assert choices[-1].startswith("Keep current (")
     return len(choices) - 1
+
+
+def _choice_by_label(choices, label):
+    return choices.index(label)
 
 
 def _read_env(home):
@@ -42,6 +52,74 @@ def _clear_provider_env(monkeypatch):
         "ANTHROPIC_API_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
+
+
+def _zai_prompt_choice(question, choices, default=0):
+    if question == "Select your inference provider:":
+        return _choice_by_label(choices, "Z.AI / GLM (Zhipu AI models)")
+    if question == "Select default model:":
+        return len(choices) - 1
+    if question == "Configure vision:":
+        return len(choices) - 1
+    tts_idx = _maybe_keep_current_tts(question, choices)
+    if tts_idx is not None:
+        return tts_idx
+    raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+
+def _zai_prompt(message, *args, **kwargs):
+    if "GLM API key" in message:
+        return "zai-key"
+    return ""
+
+
+def _patch_common_zai_setup(
+    monkeypatch,
+    *,
+    prompt_yes_no,
+    prompt_checklist=None,
+    resolve_provider_mcp_bundle=None,
+    which=None,
+    prompt_choice=_zai_prompt_choice,
+    prompt=_zai_prompt,
+):
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", prompt)
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", prompt_yes_no)
+    if prompt_checklist is not None:
+        monkeypatch.setattr("hermes_cli.setup.prompt_checklist", prompt_checklist)
+    if resolve_provider_mcp_bundle is not None:
+        monkeypatch.setattr(
+            "hermes_cli.mcp_presets.resolve_provider_mcp_bundle",
+            resolve_provider_mcp_bundle,
+        )
+    if which is not None:
+        monkeypatch.setattr("hermes_cli.mcp_presets.shutil.which", which)
+
+    monkeypatch.setattr("hermes_cli.auth.get_active_provider", lambda: None)
+    monkeypatch.setattr("hermes_cli.auth.detect_external_credentials", lambda: [])
+    monkeypatch.setattr(
+        "hermes_cli.auth.get_auth_status",
+        lambda provider_id: {"logged_in": False},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.models.fetch_api_models",
+        lambda api_key, base_url: [],
+    )
+    monkeypatch.setattr(
+        "hermes_cli.models.provider_model_ids",
+        lambda provider: [],
+    )
+    monkeypatch.setattr(
+        "hermes_cli.auth.detect_zai_endpoint",
+        lambda api_key: {
+            "base_url": "https://api.z.ai/api/paas/v4",
+            "label": "General",
+            "id": "general",
+            "model": "glm-5",
+        },
+    )
+    monkeypatch.setattr("agent.auxiliary_client.get_available_vision_backends", lambda: [])
 
 
 def test_setup_keep_current_custom_from_config_does_not_fall_through(tmp_path, monkeypatch):
@@ -236,6 +314,466 @@ def test_setup_keep_current_anthropic_can_configure_openai_vision_default(tmp_pa
     assert env.get("AUXILIARY_VISION_MODEL") == "gpt-4o-mini"
 
 
+def test_setup_zai_bundle_prompts_in_setup_with_bundle_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    config = load_config()
+    captured = {}
+    bundle = resolve_provider_mcp_bundle("zai", model="glm-5")
+    resolve_calls = []
+
+    def wrapped_resolve_provider_mcp_bundle(provider, model=None):
+        resolve_calls.append((provider, model))
+        return resolve_provider_mcp_bundle(provider, model=model)
+
+    def fake_prompt_yes_no(question, default=True):
+        if question == "Enable z.ai MCP servers during setup?":
+            captured["zai_prompt"] = (question, default)
+            return True
+        return default
+
+    def fake_prompt_checklist(title, items, pre_selected):
+        captured["checklist_title"] = title
+        captured["checklist_items"] = list(items)
+        captured["pre_selected"] = list(pre_selected)
+        return list(range(len(items)))
+
+    _patch_common_zai_setup(
+        monkeypatch,
+        prompt_yes_no=fake_prompt_yes_no,
+        prompt_checklist=fake_prompt_checklist,
+        resolve_provider_mcp_bundle=wrapped_resolve_provider_mcp_bundle,
+        which=lambda cmd: "/usr/bin/npx" if cmd == "npx" else None,
+    )
+    default_checked, notes = get_bundle_default_checked_servers(bundle)
+
+    setup_model_provider(config)
+
+    assert resolve_calls == [("zai", "glm-5")]
+    assert notes == []
+    assert captured["checklist_title"] == bundle["prompt"]["checklist_title"]
+    assert set(captured["checklist_items"]) == set(bundle["servers"])
+    expected_pre_selected = [
+        captured["checklist_items"].index(name)
+        for name in default_checked
+        if name in captured["checklist_items"]
+    ]
+    assert captured["pre_selected"] == expected_pre_selected
+    assert captured["zai_prompt"] == (
+        bundle["prompt"]["question"],
+        bundle["prompt"]["default"],
+    )
+    assert {
+        captured["checklist_items"][idx]
+        for idx in captured["pre_selected"]
+    } == {"web-search-prime", "web-reader", "zread", "zai-vision"}
+
+    saved = load_config().get("mcp_servers", {})
+    assert set(saved.keys()) == set(bundle["servers"])
+    for name, server_data in bundle["servers"].items():
+        expected_cfg = server_data["config"]
+        assert saved[name]["enabled"] is True
+        for key, value in expected_cfg.items():
+            if key == "headers":
+                assert saved[name][key]["Authorization"].startswith("Bearer ")
+                assert "zai-key" in saved[name][key]["Authorization"]
+                continue
+            if key == "env":
+                for env_key, env_value in value.items():
+                    if env_value == "${GLM_API_KEY}":
+                        assert saved[name][key][env_key] == "zai-key"
+                    else:
+                        assert saved[name][key][env_key] == env_value
+                continue
+            assert saved[name][key] == value
+
+
+def test_setup_zai_bundle_preselects_http_servers_and_shows_note_without_npx(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    config = load_config()
+    captured = {}
+    bundle = resolve_provider_mcp_bundle("zai", model="glm-5")
+
+    def fake_prompt_yes_no(question, default=True):
+        if question == "Enable z.ai MCP servers during setup?":
+            captured["zai_prompt"] = (question, default)
+            return True
+        return default
+
+    def fake_prompt_checklist(title, items, pre_selected):
+        captured["checklist_title"] = title
+        captured["checklist_items"] = list(items)
+        captured["pre_selected"] = list(pre_selected)
+        return list(range(3))
+
+    _patch_common_zai_setup(
+        monkeypatch,
+        prompt_yes_no=fake_prompt_yes_no,
+        prompt_checklist=fake_prompt_checklist,
+        which=lambda _cmd: None,
+    )
+    default_checked, notes = get_bundle_default_checked_servers(bundle)
+
+    setup_model_provider(config)
+
+    assert captured["checklist_title"] == bundle["prompt"]["checklist_title"]
+    assert set(captured["checklist_items"]) == set(bundle["servers"])
+    expected_pre_selected = [
+        captured["checklist_items"].index(name)
+        for name in default_checked
+        if name in captured["checklist_items"]
+    ]
+    assert captured["pre_selected"] == expected_pre_selected
+    assert captured["zai_prompt"] == (
+        bundle["prompt"]["question"],
+        bundle["prompt"]["default"],
+    )
+    pre_selected_names = [
+        captured["checklist_items"][idx]
+        for idx in captured["pre_selected"]
+    ]
+    assert pre_selected_names == ["web-search-prime", "web-reader", "zread"]
+    assert "zai-vision" not in pre_selected_names
+    output = capsys.readouterr().out
+    assert notes == ["`zai-vision` was not preselected because `npx` is unavailable."]
+    assert notes[0] in output
+
+
+def test_setup_zai_bundle_merge_preserves_existing_entries_and_reports_skips(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    existing_entry = {
+        "url": "https://example.invalid/existing",
+        "enabled": False,
+        "tools": {"exclude": ["foo"]},
+    }
+    base = load_config()
+    base["mcp_servers"] = {
+        "web-reader": copy.deepcopy(existing_entry),
+    }
+    save_config(base)
+    config = load_config()
+
+    def fake_prompt_yes_no(question, default=True):
+        if question == "Enable z.ai MCP servers during setup?":
+            return True
+        return default
+
+    def fake_prompt_checklist(title, items, pre_selected):
+        return list(range(len(items)))
+
+    _patch_common_zai_setup(
+        monkeypatch,
+        prompt_yes_no=fake_prompt_yes_no,
+        prompt_checklist=fake_prompt_checklist,
+        which=lambda cmd: "/usr/bin/npx" if cmd == "npx" else None,
+    )
+    bundle = resolve_provider_mcp_bundle("zai", model="glm-5")
+
+    setup_model_provider(config)
+
+    output = capsys.readouterr().out
+    reloaded = load_config()
+
+    assert reloaded["mcp_servers"]["web-reader"] == existing_entry
+    assert set(reloaded["mcp_servers"].keys()) == set(bundle["servers"]) | {"web-reader"}
+    assert "MCP servers added:" in output
+    assert "web-search-prime" in output
+    assert "zread" in output
+    assert "MCP servers already configured (not overwritten): web-reader" in output
+
+
+def test_setup_zai_bundle_skips_runtime_name_alias_collision(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    existing_entry = {
+        "command": "npx",
+        "args": ["-y", "old-server"],
+    }
+    base = load_config()
+    base["mcp_servers"] = {
+        "zai_vision": copy.deepcopy(existing_entry),
+    }
+    save_config(base)
+    config = load_config()
+
+    def fake_prompt_yes_no(question, default=True):
+        if question == "Enable z.ai MCP servers during setup?":
+            return True
+        return default
+
+    def fake_prompt_checklist(title, items, pre_selected):
+        return list(range(len(items)))
+
+    _patch_common_zai_setup(
+        monkeypatch,
+        prompt_yes_no=fake_prompt_yes_no,
+        prompt_checklist=fake_prompt_checklist,
+        which=lambda cmd: "/usr/bin/npx" if cmd == "npx" else None,
+    )
+
+    setup_model_provider(config)
+
+    output = capsys.readouterr().out
+    reloaded = load_config()
+
+    assert reloaded["mcp_servers"]["zai_vision"] == existing_entry
+    assert "zai-vision" not in reloaded["mcp_servers"]
+    assert (
+        "MCP servers skipped because an equivalent server is already configured: "
+        "zai-vision (matches existing zai_vision)"
+    ) in output
+
+
+def test_setup_zai_bundle_skips_equivalent_existing_server_by_identity(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    existing_entry = {
+        "url": "https://api.z.ai/api/mcp/zread/mcp",
+        "headers": {"Authorization": "Bearer ${GLM_API_KEY}"},
+        "enabled": False,
+        "tools": {"exclude": ["foo"]},
+        "timeout": 120,
+    }
+    base = load_config()
+    base["mcp_servers"] = {
+        "custom-zread": copy.deepcopy(existing_entry),
+    }
+    save_config(base)
+    monkeypatch.setenv("GLM_API_KEY", "zai-key")
+    config = load_config()
+
+    def fake_prompt_yes_no(question, default=True):
+        if question == "Enable z.ai MCP servers during setup?":
+            return True
+        return default
+
+    def fake_prompt_checklist(title, items, pre_selected):
+        return list(range(len(items)))
+
+    _patch_common_zai_setup(
+        monkeypatch,
+        prompt_yes_no=fake_prompt_yes_no,
+        prompt_checklist=fake_prompt_checklist,
+        which=lambda cmd: "/usr/bin/npx" if cmd == "npx" else None,
+    )
+
+    setup_model_provider(config)
+
+    output = capsys.readouterr().out
+    reloaded = load_config()
+
+    assert reloaded["mcp_servers"]["custom-zread"]["url"] == existing_entry["url"]
+    assert reloaded["mcp_servers"]["custom-zread"]["enabled"] is False
+    assert reloaded["mcp_servers"]["custom-zread"]["tools"] == {"exclude": ["foo"]}
+    assert reloaded["mcp_servers"]["custom-zread"]["timeout"] == 120
+    assert "zread" not in reloaded["mcp_servers"]
+    assert (
+        "MCP servers already configured under a different name (not duplicated): "
+        "zread (matches existing custom-zread)"
+    ) in output
+
+
+def test_setup_zai_bundle_skips_equivalent_unsaved_in_memory_server(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    config = load_config()
+    config["mcp_servers"] = {
+        "custom-zread": {
+            "url": "https://api.z.ai/api/mcp/zread/mcp",
+            "headers": {"Authorization": "Bearer zai-key"},
+            "enabled": False,
+        }
+    }
+
+    def fake_prompt_yes_no(question, default=True):
+        if question == "Enable z.ai MCP servers during setup?":
+            return True
+        return default
+
+    def fake_prompt_checklist(title, items, pre_selected):
+        return list(range(len(items)))
+
+    _patch_common_zai_setup(
+        monkeypatch,
+        prompt_yes_no=fake_prompt_yes_no,
+        prompt_checklist=fake_prompt_checklist,
+        which=lambda cmd: "/usr/bin/npx" if cmd == "npx" else None,
+    )
+
+    setup_model_provider(config)
+
+    output = capsys.readouterr().out
+    reloaded = load_config()
+
+    assert reloaded["mcp_servers"]["custom-zread"]["url"] == "https://api.z.ai/api/mcp/zread/mcp"
+    assert "zread" not in reloaded["mcp_servers"]
+    assert (
+        "MCP servers already configured under a different name (not duplicated): "
+        "zread (matches existing custom-zread)"
+    ) in output
+
+
+def test_setup_non_zai_provider_with_no_bundle_does_not_enter_mcp_prompt_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    config = load_config()
+    resolve_calls = []
+
+    def wrapped_resolve_provider_mcp_bundle(provider, model=None):
+        resolve_calls.append((provider, model))
+        return resolve_provider_mcp_bundle(provider, model=model)
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select your inference provider:":
+            return _choice_by_label(choices, "OpenRouter API key (100+ models, pay-per-use)")
+        if question == "Configure vision:":
+            return len(choices) - 1
+        if question == "Select default model:":
+            return len(choices) - 1
+        tts_idx = _maybe_keep_current_tts(question, choices)
+        if tts_idx is not None:
+            return tts_idx
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    def fake_prompt(message, *args, **kwargs):
+        if message.startswith("  OpenRouter API key"):
+            return "or-key"
+        return ""
+
+    def fake_prompt_yes_no(question, default=True):
+        raise AssertionError(f"Unexpected prompt_yes_no call: {question}")
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", fake_prompt)
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", fake_prompt_yes_no)
+    monkeypatch.setattr(
+        "hermes_cli.mcp_presets.resolve_provider_mcp_bundle",
+        wrapped_resolve_provider_mcp_bundle,
+    )
+    monkeypatch.setattr("hermes_cli.auth.get_active_provider", lambda: None)
+    monkeypatch.setattr("hermes_cli.auth.detect_external_credentials", lambda: [])
+    monkeypatch.setattr(
+        "hermes_cli.auth.get_auth_status",
+        lambda provider_id: {"logged_in": False},
+    )
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", lambda api_key, base_url: [])
+    monkeypatch.setattr("agent.auxiliary_client.get_available_vision_backends", lambda: [])
+
+    setup_model_provider(config)
+    assert resolve_calls == [("openrouter", "anthropic/claude-opus-4.6")]
+
+
+def test_setup_zai_bundle_decline_stops_after_prompt_without_checklist(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    base = load_config()
+    base["mcp_servers"] = {
+        "existing": {"command": "npx", "args": ["-y", "example"]},
+    }
+    save_config(base)
+    config = load_config()
+    original_mcp_servers = copy.deepcopy(config.get("mcp_servers", {}))
+    event_log = []
+    bundle = resolve_provider_mcp_bundle("zai", model="glm-5")
+    resolve_calls = []
+
+    def wrapped_resolve_provider_mcp_bundle(provider, model=None):
+        resolve_calls.append((provider, model))
+        return resolve_provider_mcp_bundle(provider, model=model)
+
+    def logging_prompt_choice(question, choices, default=0):
+        if question == "Select your inference provider:":
+            event_log.append("provider_prompt")
+        elif question == "Select default model:":
+            event_log.append("model_prompt")
+        elif question == "Configure vision:":
+            event_log.append("vision_prompt")
+        elif question == "Select TTS provider:":
+            event_log.append("tts_prompt")
+        return _zai_prompt_choice(question, choices, default)
+
+    def fake_prompt_checklist(*args, **kwargs):
+        event_log.append("checklist")
+        raise AssertionError("Checklist should not run when MCP setup is declined.")
+
+    zai_prompt_seen = {"called": False, "question": None, "default": None}
+
+    def fake_prompt_yes_no(question, default=True):
+        if "Enable z.ai MCP servers during setup?" in question:
+            zai_prompt_seen["called"] = True
+            zai_prompt_seen["question"] = question
+            zai_prompt_seen["default"] = default
+            event_log.append("zai_prompt")
+            return False
+        event_log.append("other_yes_no")
+        return default
+
+    _patch_common_zai_setup(
+        monkeypatch,
+        prompt_yes_no=fake_prompt_yes_no,
+        prompt_checklist=fake_prompt_checklist,
+        resolve_provider_mcp_bundle=wrapped_resolve_provider_mcp_bundle,
+        prompt_choice=logging_prompt_choice,
+    )
+
+    setup_model_provider(config)
+
+    reloaded = load_config()
+    assert reloaded.get("mcp_servers", {}) == original_mcp_servers
+    assert resolve_calls == [("zai", "glm-5")]
+    assert zai_prompt_seen["called"] is True
+    assert zai_prompt_seen["question"] == bundle["prompt"]["question"]
+    assert zai_prompt_seen["default"] == bundle["prompt"]["default"]
+    assert "provider_prompt" in event_log
+    assert "model_prompt" in event_log
+    assert "zai_prompt" in event_log
+    assert "checklist" not in event_log
+    assert event_log.index("model_prompt") < event_log.index("zai_prompt")
+
+
+def test_setup_zai_bundle_failure_warns_and_continues(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    config = load_config()
+    prompts_seen = []
+
+    def fake_prompt_yes_no(question, default=True):
+        prompts_seen.append(question)
+        return default
+
+    _patch_common_zai_setup(
+        monkeypatch,
+        prompt_yes_no=fake_prompt_yes_no,
+        resolve_provider_mcp_bundle=lambda provider, model=None: (_ for _ in ()).throw(
+            ValueError("broken preset data")
+        ),
+    )
+
+    setup_model_provider(config)
+
+    output = capsys.readouterr().out
+    reloaded = load_config()
+
+    assert "Failed to resolve provider-linked MCP presets" in output
+    assert "Enable z.ai MCP servers during setup?" not in prompts_seen
+    assert "mcp_servers" not in reloaded or reloaded["mcp_servers"] == {}
+    model_cfg = reloaded.get("model", {})
+    assert isinstance(model_cfg, dict)
+    assert model_cfg.get("provider") == "zai"
+    assert model_cfg.get("default") == "glm-5"
+
+
 def test_setup_copilot_uses_gh_auth_and_saves_provider(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     _clear_provider_env(monkeypatch)
@@ -244,8 +782,7 @@ def test_setup_copilot_uses_gh_auth_and_saves_provider(tmp_path, monkeypatch):
 
     def fake_prompt_choice(question, choices, default=0):
         if question == "Select your inference provider:":
-            assert choices[14] == "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)"
-            return 14
+            return _choice_by_label(choices, "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)")
         if question == "Select default model:":
             assert "gpt-4.1" in choices
             assert "gpt-5.4" in choices
@@ -323,8 +860,7 @@ def test_setup_copilot_acp_uses_model_picker_and_saves_provider(tmp_path, monkey
 
     def fake_prompt_choice(question, choices, default=0):
         if question == "Select your inference provider:":
-            assert choices[15] == "GitHub Copilot ACP (spawns `copilot --acp --stdio`)"
-            return 15
+            return _choice_by_label(choices, "GitHub Copilot ACP (spawns `copilot --acp --stdio`)")
         if question == "Select default model:":
             assert "gpt-4.1" in choices
             assert "gpt-5.4" in choices

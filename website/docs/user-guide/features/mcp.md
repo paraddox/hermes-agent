@@ -52,6 +52,22 @@ List the files in /home/user/projects and summarize the repo structure.
 
 Hermes will discover the MCP server's tools and use them like any other tool.
 
+## Provider-linked MCP setup in model setup
+
+`hermes setup model` can offer MCP bundles during setup when the selected `provider`/`provider:model` has linked preset data.
+
+This is a setup-only, explicit flow:
+
+- It is not a background auto-run; setup prompts you directly in the wizard.
+- A checklist is shown so you can opt into only the MCP entries you want.
+- New MCP entries are additive: existing `mcp_servers` entries are preserved and not overwritten.
+
+The only shipped provider-linked example today is z.ai, which uses the z.ai preset bundle when z.ai is selected.
+
+After setup, MCP remains managed the normal way via `~/.hermes/config.yaml` and `hermes mcp ...` commands.
+
+Provider switching does not auto-disable MCP entries; changing provider/model does not clear or disable MCP servers.
+
 ## Two kinds of MCP servers
 
 ### Stdio servers

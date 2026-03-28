@@ -1,0 +1,39 @@
+presets:
+  - match:
+      provider: zai
+    prompt:
+      question: "Enable z.ai MCP servers during setup?"
+      default: true
+      checklist_title: "Select z.ai MCP servers to enable:"
+    servers:
+      web-search-prime:
+        default_checked: true
+        config:
+          url: "https://api.z.ai/api/mcp/web_search_prime/mcp"
+          headers:
+            Authorization: "Bearer ${GLM_API_KEY}"
+
+      web-reader:
+        default_checked: true
+        config:
+          url: "https://api.z.ai/api/mcp/web_reader/mcp"
+          headers:
+            Authorization: "Bearer ${GLM_API_KEY}"
+
+      zread:
+        default_checked: true
+        config:
+          url: "https://api.z.ai/api/mcp/zread/mcp"
+          headers:
+            Authorization: "Bearer ${GLM_API_KEY}"
+
+      zai-vision:
+        default_checked_when:
+          command_available: "npx"
+        note_when_unchecked: "`zai-vision` was not preselected because `npx` is unavailable."
+        config:
+          command: "npx"
+          args: ["-y", "@z_ai/mcp-server@latest"]
+          env:
+            Z_AI_API_KEY: "${GLM_API_KEY}"
+            Z_AI_MODE: "ZAI"
