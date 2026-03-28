@@ -155,7 +155,7 @@ Use the full wizard or jump into one section:
 
 | Section | Description |
 |---------|-------------|
-| `model` | Provider and model setup. |
+| `model` | Provider and model setup. Matching providers can offer a provider-linked MCP checklist during setup. |
 | `terminal` | Terminal backend and sandbox setup. |
 | `gateway` | Messaging platform setup. |
 | `tools` | Enable/disable tools per platform. |
@@ -167,6 +167,8 @@ Options:
 |--------|-------------|
 | `--non-interactive` | Use defaults / environment values without prompts. |
 | `--reset` | Reset configuration to defaults before setup. |
+
+For provider-linked MCP behavior details, see the [MCP feature guide](../user-guide/features/mcp.md#provider-linked-mcp-setup-in-model-setup).
 
 ## `hermes whatsapp`
 

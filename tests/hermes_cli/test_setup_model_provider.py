@@ -113,6 +113,57 @@ def test_setup_keep_current_config_provider_uses_provider_specific_model_menu(
     assert reloaded["model"]["provider"] == "zai"
 
 
+def test_setup_invokes_provider_mcp_bundle_after_shared_model_flow(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    config = load_config()
+    captured = {}
+
+    def fake_select():
+        _write_model_config("zai", "https://api.z.ai/api/paas/v4", "glm-5")
+
+    def fake_snapshot(config_arg, *, raw_config=None):
+        captured["snapshot_raw"] = raw_config
+        return {"existing-zread": {"url": "https://example.invalid/mcp"}}
+
+    def fake_bundle(
+        config_arg,
+        selected_provider,
+        *,
+        existing_mcp_servers_raw,
+        prompt_yes_no,
+        prompt_checklist,
+        print_warning,
+        print_success,
+        logger,
+    ):
+        captured["selected_provider"] = selected_provider
+        captured["existing_mcp_servers_raw"] = existing_mcp_servers_raw
+        config_arg.setdefault("mcp_servers", {})["zread"] = {
+            "url": "https://api.z.ai/api/mcp/zread/mcp",
+        }
+
+    monkeypatch.setattr("hermes_cli.main.select_provider_and_model", fake_select)
+    _stub_tts(monkeypatch)
+    monkeypatch.setattr("agent.auxiliary_client.get_available_vision_backends", lambda: [])
+    monkeypatch.setattr("hermes_cli.mcp_presets.snapshot_existing_mcp_servers_raw", fake_snapshot)
+    monkeypatch.setattr("hermes_cli.mcp_presets.configure_provider_mcp_bundle", fake_bundle)
+
+    setup_model_provider(config)
+
+    reloaded = load_config()
+    assert captured["selected_provider"] == "zai"
+    assert captured["existing_mcp_servers_raw"] == {
+        "existing-zread": {"url": "https://example.invalid/mcp"}
+    }
+    assert captured["snapshot_raw"]["model"]["provider"] == "zai"
+    assert captured["snapshot_raw"]["model"]["default"] == "glm-5"
+    assert reloaded["model"]["provider"] == "zai"
+    assert reloaded["model"]["default"] == "glm-5"
+    assert reloaded["mcp_servers"]["zread"]["url"] == "https://api.z.ai/api/mcp/zread/mcp"
+
+
 def test_setup_same_provider_rotation_strategy_saved_for_multi_credential_pool(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     _clear_provider_env(monkeypatch)

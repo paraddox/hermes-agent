@@ -840,7 +840,11 @@ def setup_model_provider(config: dict):
     This ensures a single code path for all provider setup — any new
     provider added to ``hermes model`` is automatically available here.
     """
-    from hermes_cli.config import load_config, save_config
+    from hermes_cli.config import load_config, load_raw_config, save_config
+    from hermes_cli.mcp_presets import (
+        configure_provider_mcp_bundle,
+        snapshot_existing_mcp_servers_raw,
+    )
 
     print_header("Inference Provider")
     print_info("Choose how to connect to your main chat model.")
@@ -1038,6 +1042,19 @@ def setup_model_provider(config: dict):
         else:
             print_info("Skipped — add later with 'hermes setup' or configure AUXILIARY_VISION_* settings")
 
+    configure_provider_mcp_bundle(
+        config,
+        selected_provider,
+        existing_mcp_servers_raw=snapshot_existing_mcp_servers_raw(
+            config,
+            raw_config=load_raw_config(),
+        ),
+        prompt_yes_no=prompt_yes_no,
+        prompt_checklist=prompt_checklist,
+        print_warning=print_warning,
+        print_success=print_success,
+        logger=logger,
+    )
 
     save_config(config)
 

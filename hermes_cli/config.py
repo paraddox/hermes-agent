@@ -1427,32 +1427,51 @@ def _normalize_max_turns_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
+def _load_user_config_file() -> Dict[str, Any]:
+    """Load the raw user config file without applying defaults or env expansion."""
+    ensure_hermes_home()
+    config_path = get_config_path()
+    if not config_path.exists():
+        return {}
+
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            user_config = yaml.safe_load(f) or {}
+    except Exception as e:
+        print(f"Warning: Failed to load config: {e}")
+        return {}
+
+    return user_config if isinstance(user_config, dict) else {}
+
+
+def load_raw_config() -> Dict[str, Any]:
+    """Load raw configuration from ~/.hermes/config.yaml without env expansion."""
+    return _load_user_config_file()
+
+
 
 def load_config() -> Dict[str, Any]:
     """Load configuration from ~/.hermes/config.yaml."""
     import copy
     ensure_hermes_home()
-    config_path = get_config_path()
-    
-    config = copy.deepcopy(DEFAULT_CONFIG)
-    
-    if config_path.exists():
-        try:
-            with open(config_path, encoding="utf-8") as f:
-                user_config = yaml.safe_load(f) or {}
 
-            if "max_turns" in user_config:
-                agent_user_config = dict(user_config.get("agent") or {})
-                if agent_user_config.get("max_turns") is None:
-                    agent_user_config["max_turns"] = user_config["max_turns"]
-                user_config["agent"] = agent_user_config
-                user_config.pop("max_turns", None)
+    default_config = copy.deepcopy(DEFAULT_CONFIG)
+    try:
+        user_config = _load_user_config_file()
+        if "max_turns" in user_config:
+            agent_user_config = dict(user_config.get("agent") or {})
+            if agent_user_config.get("max_turns") is None:
+                agent_user_config["max_turns"] = user_config["max_turns"]
+            user_config["agent"] = agent_user_config
+            user_config.pop("max_turns", None)
 
-            config = _deep_merge(config, user_config)
-        except Exception as e:
-            print(f"Warning: Failed to load config: {e}")
-    
-    return _expand_env_vars(_normalize_root_model_keys(_normalize_max_turns_config(config)))
+        config = _deep_merge(default_config, user_config)
+        return _expand_env_vars(_normalize_root_model_keys(_normalize_max_turns_config(config)))
+    except Exception as e:
+        print(f"Warning: Failed to load config: {e}")
+        return _expand_env_vars(
+            _normalize_root_model_keys(_normalize_max_turns_config(default_config))
+        )
 
 
 _SECURITY_COMMENT = """

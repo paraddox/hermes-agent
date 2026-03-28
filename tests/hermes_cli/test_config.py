@@ -77,6 +77,20 @@ class TestLoadConfigDefaults:
             assert config["agent"]["max_turns"] == 42
             assert "max_turns" not in config
 
+    def test_malformed_but_parseable_shape_warns_and_falls_back_to_defaults(
+        self, tmp_path, capsys
+    ):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text("agent: bad-value\n", encoding="utf-8")
+
+            config = load_config()
+
+            assert config["agent"]["max_turns"] == DEFAULT_CONFIG["agent"]["max_turns"]
+            assert config["model"] == DEFAULT_CONFIG["model"]
+            out = capsys.readouterr().out
+            assert "Warning: Failed to load config:" in out
+
 
 class TestSaveAndLoadRoundtrip:
     def test_roundtrip(self, tmp_path):

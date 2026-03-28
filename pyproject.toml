@@ -104,6 +104,9 @@ py-modules = ["run_agent", "model_tools", "toolsets", "batch_runner", "trajector
 [tool.setuptools.packages.find]
 include = ["agent", "tools", "tools.*", "hermes_cli", "gateway", "gateway.*", "cron", "honcho_integration", "acp_adapter"]
 
+[tool.setuptools.package-data]
+hermes_cli = ["mcp_provider_presets.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
