@@ -85,6 +85,7 @@ DEFAULT_FALLBACK_CONTEXT = CONTEXT_PROBE_TIERS[0]
 # all miss. Replaced the previous 80+ entry dict.
 # For provider-specific context lengths, models.dev is the primary source.
 DEFAULT_CONTEXT_LENGTHS = {
+    "accounts/fireworks/routers/kimi-k2p5-turbo": 256000,
     # Anthropic Claude 4.6 (1M context) — bare IDs only to avoid
     # fuzzy-match collisions (e.g. "anthropic/claude-sonnet-4" is a
     # substring of "anthropic/claude-sonnet-4.6").
@@ -164,6 +165,7 @@ _URL_TO_PROVIDER: Dict[str, str] = {
     "api.openai.com": "openai",
     "chatgpt.com": "openai",
     "api.anthropic.com": "anthropic",
+    "api.fireworks.ai": "fireworks",
     "api.z.ai": "zai",
     "api.moonshot.ai": "kimi-coding",
     "api.kimi.com": "kimi-coding",

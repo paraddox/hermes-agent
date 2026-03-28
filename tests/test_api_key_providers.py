@@ -1,4 +1,4 @@
-"""Tests for API-key provider support (z.ai/GLM, Kimi, MiniMax, AI Gateway)."""
+"""Tests for API-key provider support (z.ai/GLM, Kimi, MiniMax, Fireworks, AI Gateway)."""
 
 import os
 import sys
@@ -38,6 +38,7 @@ class TestProviderRegistry:
     @pytest.mark.parametrize("provider_id,name,auth_type", [
         ("copilot-acp", "GitHub Copilot ACP", "external_process"),
         ("copilot", "GitHub Copilot", "api_key"),
+        ("fireworks", "Fireworks AI", "api_key"),
         ("huggingface", "Hugging Face", "api_key"),
         ("zai", "Z.AI / GLM", "api_key"),
         ("kimi-coding", "Kimi / Moonshot", "api_key"),
@@ -62,6 +63,11 @@ class TestProviderRegistry:
         pconfig = PROVIDER_REGISTRY["copilot"]
         assert pconfig.api_key_env_vars == ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
         assert pconfig.base_url_env_var == ""
+
+    def test_fireworks_env_vars(self):
+        pconfig = PROVIDER_REGISTRY["fireworks"]
+        assert pconfig.api_key_env_vars == ("FIREWORKS_API_KEY",)
+        assert pconfig.base_url_env_var == "FIREWORKS_BASE_URL"
 
     def test_kimi_env_vars(self):
         pconfig = PROVIDER_REGISTRY["kimi-coding"]
@@ -96,6 +102,7 @@ class TestProviderRegistry:
     def test_base_urls(self):
         assert PROVIDER_REGISTRY["copilot"].inference_base_url == "https://api.githubcopilot.com"
         assert PROVIDER_REGISTRY["copilot-acp"].inference_base_url == "acp://copilot"
+        assert PROVIDER_REGISTRY["fireworks"].inference_base_url == "https://api.fireworks.ai/inference/v1"
         assert PROVIDER_REGISTRY["zai"].inference_base_url == "https://api.z.ai/api/paas/v4"
         assert PROVIDER_REGISTRY["kimi-coding"].inference_base_url == "https://api.moonshot.ai/v1"
         assert PROVIDER_REGISTRY["minimax"].inference_base_url == "https://api.minimax.io/anthropic"
@@ -119,6 +126,7 @@ class TestProviderRegistry:
 PROVIDER_ENV_VARS = (
     "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    "FIREWORKS_API_KEY", "FIREWORKS_BASE_URL",
     "GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY",
     "KIMI_API_KEY", "KIMI_BASE_URL", "MINIMAX_API_KEY", "MINIMAX_CN_API_KEY",
     "AI_GATEWAY_API_KEY", "AI_GATEWAY_BASE_URL",
@@ -146,6 +154,9 @@ class TestResolveProvider:
     def test_explicit_kimi_coding(self):
         assert resolve_provider("kimi-coding") == "kimi-coding"
 
+    def test_explicit_fireworks(self):
+        assert resolve_provider("fireworks") == "fireworks"
+
     def test_explicit_minimax(self):
         assert resolve_provider("minimax") == "minimax"
 
@@ -166,6 +177,9 @@ class TestResolveProvider:
 
     def test_alias_kimi(self):
         assert resolve_provider("kimi") == "kimi-coding"
+
+    def test_alias_fireworks_ai(self):
+        assert resolve_provider("fireworks-ai") == "fireworks"
 
     def test_alias_moonshot(self):
         assert resolve_provider("moonshot") == "kimi-coding"
@@ -238,6 +252,15 @@ class TestResolveProvider:
         monkeypatch.setenv("KIMI_API_KEY", "test-kimi-key")
         assert resolve_provider("auto") == "kimi-coding"
 
+    def test_auto_detects_fireworks_key(self, monkeypatch):
+        monkeypatch.setenv("FIREWORKS_API_KEY", "test-fireworks-key")
+        assert resolve_provider("auto") == "fireworks"
+
+    def test_auto_prefers_other_provider_over_fireworks(self, monkeypatch):
+        monkeypatch.setenv("FIREWORKS_API_KEY", "test-fireworks-key")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
+        assert resolve_provider("auto") == "anthropic"
+
     def test_auto_detects_minimax_key(self, monkeypatch):
         monkeypatch.setenv("MINIMAX_API_KEY", "test-mm-key")
         assert resolve_provider("auto") == "minimax"
@@ -295,6 +318,14 @@ class TestApiKeyProviderStatus:
         status = get_api_key_provider_status("zai")
         assert status["configured"] is True
         assert status["key_source"] == "ZAI_API_KEY"
+
+    def test_fireworks_status_uses_default_base_url(self, monkeypatch):
+        monkeypatch.setenv("FIREWORKS_API_KEY", "fw-key")
+        status = get_api_key_provider_status("fireworks")
+        assert status["configured"] is True
+        assert status["logged_in"] is True
+        assert status["key_source"] == "FIREWORKS_API_KEY"
+        assert status["base_url"] == "https://api.fireworks.ai/inference/v1"
 
     def test_custom_base_url(self, monkeypatch):
         monkeypatch.setenv("KIMI_API_KEY", "kimi-key")
@@ -417,6 +448,14 @@ class TestResolveApiKeyProviderCredentials:
         assert creds["provider"] == "kimi-coding"
         assert creds["api_key"] == "kimi-secret-key"
         assert creds["base_url"] == "https://api.moonshot.ai/v1"
+
+    def test_resolve_fireworks_with_key(self, monkeypatch):
+        monkeypatch.setenv("FIREWORKS_API_KEY", "fw-secret-key")
+        creds = resolve_api_key_provider_credentials("fireworks")
+        assert creds["provider"] == "fireworks"
+        assert creds["api_key"] == "fw-secret-key"
+        assert creds["base_url"] == "https://api.fireworks.ai/inference/v1"
+        assert creds["source"] == "FIREWORKS_API_KEY"
 
     def test_resolve_minimax_with_key(self, monkeypatch):
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-secret-key")

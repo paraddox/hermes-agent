@@ -914,6 +914,7 @@ def select_provider_and_model(args=None):
         "copilot-acp": "GitHub Copilot ACP",
         "copilot": "GitHub Copilot",
         "anthropic": "Anthropic",
+        "fireworks": "Fireworks AI",
         "zai": "Z.AI / GLM",
         "kimi-coding": "Kimi / Moonshot",
         "minimax": "MiniMax",
@@ -951,6 +952,7 @@ def select_provider_and_model(args=None):
         ("ai-gateway", "AI Gateway (Vercel — 200+ models, pay-per-use)"),
         ("alibaba", "Alibaba Cloud / DashScope Coding (Qwen + multi-provider)"),
         ("huggingface", "Hugging Face Inference Providers (20+ open models)"),
+        ("fireworks", "Fireworks AI (open models + Fire Pass)"),
     ]
 
     # Add user-defined custom providers from config.yaml
@@ -1023,7 +1025,7 @@ def select_provider_and_model(args=None):
         _model_flow_anthropic(config, current_model)
     elif selected_provider == "kimi-coding":
         _model_flow_kimi(config, current_model)
-    elif selected_provider in ("zai", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface"):
+    elif selected_provider in ("fireworks", "zai", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface"):
         _model_flow_api_key_provider(config, selected_provider, current_model)
 
 
@@ -2171,14 +2173,32 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
     # Providers with large live catalogs (100+ models) use a curated list instead
     # so users see familiar model names rather than an overwhelming dump.
     curated = _PROVIDER_MODELS.get(provider_id, [])
-    if curated and len(curated) >= 8:
+    if provider_id == "fireworks":
+        from hermes_cli.models import provider_model_ids
+
+        model_list = provider_model_ids("fireworks")
+        if model_list:
+            print(f"  Found {len(model_list)} Fireworks model(s)")
+        else:
+            model_list = curated
+    elif curated and len(curated) >= 8:
         # Curated list is substantial — use it directly, skip live probe
         live_models = None
     else:
         api_key_for_probe = existing_key or (get_env_value(key_env) if key_env else "")
         live_models = fetch_api_models(api_key_for_probe, effective_base)
 
-    if live_models and len(live_models) >= len(curated):
+    if provider_id == "fireworks":
+        from hermes_cli.models import provider_model_ids
+
+        model_list = provider_model_ids("fireworks")
+        if model_list:
+            print(f"  Found {len(model_list)} Fireworks model(s)")
+        else:
+            model_list = curated
+            if model_list:
+                print(f"  Showing {len(model_list)} curated models — use \"Enter custom model name\" for others.")
+    elif live_models and len(live_models) >= len(curated):
         model_list = live_models
         print(f"  Found {len(model_list)} model(s) from {pconfig.name} API")
     else:
@@ -2186,7 +2206,6 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
         if model_list:
             print(f"  Showing {len(model_list)} curated models — use \"Enter custom model name\" for others.")
         # else: no defaults either, will fall through to raw input
-
     if provider_id in {"opencode-zen", "opencode-go"}:
         model_list = [normalize_opencode_model_id(provider_id, mid) for mid in model_list]
         current_model = normalize_opencode_model_id(provider_id, current_model)
@@ -4074,7 +4093,7 @@ For more help on a command:
     )
     chat_parser.add_argument(
         "--provider",
-        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "huggingface", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode"],
+        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "huggingface", "fireworks", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode"],
         default=None,
         help="Inference provider (default: auto)"
     )

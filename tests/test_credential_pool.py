@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -947,3 +948,9 @@ def test_list_custom_pool_providers(tmp_path, monkeypatch):
     result = list_custom_pool_providers()
     assert result == ["custom:fireworks", "custom:together.ai"]
     # "custom:empty" not included because it's empty
+
+
+def test_credential_pool_does_not_directly_import_pool_store_helpers_from_auth():
+    source = Path("agent/credential_pool.py").read_text(encoding="utf-8")
+    assert "read_credential_pool," not in source
+    assert "write_credential_pool," not in source

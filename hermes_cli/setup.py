@@ -86,6 +86,11 @@ def _supports_same_provider_pool_setup(provider: str) -> bool:
     return pconfig.auth_type in {"api_key", "oauth_device_code"}
 
 
+_FIREWORKS_FIRE_PASS_MODELS = [
+    "accounts/fireworks/routers/kimi-k2p5-turbo",
+]
+
+
 # Default model lists per provider — used as fallback when the live
 # /models endpoint can't be reached.
 _DEFAULT_PROVIDER_MODELS = {
@@ -107,6 +112,12 @@ _DEFAULT_PROVIDER_MODELS = {
         "claude-haiku-4.5",
         "gemini-2.5-pro",
         "grok-code-fast-1",
+    ],
+    "fireworks": [
+        *_FIREWORKS_FIRE_PASS_MODELS,
+        "accounts/fireworks/models/kimi-k2p5",
+        "accounts/fireworks/models/glm-5",
+        "accounts/fireworks/models/deepseek-v3p1",
     ],
     "zai": ["glm-5", "glm-4.7", "glm-4.5", "glm-4.5-flash"],
     "kimi-coding": ["kimi-k2.5", "kimi-k2-thinking", "kimi-k2-turbo-preview"],
@@ -187,6 +198,7 @@ def _setup_provider_model_selection(config, provider_id, current_model, prompt_c
     from hermes_cli.auth import PROVIDER_REGISTRY, resolve_api_key_provider_credentials
     from hermes_cli.config import get_env_value
     from hermes_cli.models import (
+        _fetch_fireworks_models,
         copilot_model_api_mode,
         fetch_api_models,
         fetch_github_model_catalog,
@@ -231,6 +243,10 @@ def _setup_provider_model_selection(config, provider_id, current_model, prompt_c
     # Try live /models endpoint
     if is_copilot_catalog_provider and catalog:
         live_models = [item.get("id", "") for item in catalog if item.get("id")]
+    elif provider_id == "fireworks":
+        live_models = _fetch_fireworks_models(api_key)
+        if live_models:
+            live_models = list(dict.fromkeys(_FIREWORKS_FIRE_PASS_MODELS + live_models))
     else:
         live_models = fetch_api_models(api_key, base_url)
 
