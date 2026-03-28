@@ -19,6 +19,23 @@ def _maybe_keep_current_tts(question, choices):
     return len(choices) - 1
 
 
+def _choice_by_label(choices, label):
+    return choices.index(label)
+
+
+def _read_env(home):
+    env_path = home / ".env"
+    data = {}
+    if not env_path.exists():
+        return data
+    for line in env_path.read_text().splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        data[k] = v
+    return data
+
+
 def _clear_provider_env(monkeypatch):
     for key in (
         "HERMES_INFERENCE_PROVIDER",
@@ -27,6 +44,8 @@ def _clear_provider_env(monkeypatch):
         "OPENROUTER_API_KEY",
         "GITHUB_TOKEN",
         "GH_TOKEN",
+        "FIREWORKS_API_KEY",
+        "FIREWORKS_BASE_URL",
         "GLM_API_KEY",
         "KIMI_API_KEY",
         "MINIMAX_API_KEY",
@@ -112,6 +131,37 @@ def test_setup_keep_current_config_provider_uses_provider_specific_model_menu(
     reloaded = load_config()
     assert isinstance(reloaded["model"], dict)
     assert reloaded["model"]["provider"] == "zai"
+
+
+def test_setup_keep_current_fireworks_preserves_router_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+    _stub_tts(monkeypatch)
+    save_env_value("FIREWORKS_API_KEY", "fw-key")
+
+    _write_model_config(
+        "fireworks",
+        "https://api.fireworks.ai/inference/v1",
+        "accounts/fireworks/routers/kimi-k2p5-turbo",
+    )
+
+    config = load_config()
+
+    def fake_select():
+        pass
+
+    monkeypatch.setattr("hermes_cli.main.select_provider_and_model", fake_select)
+
+    setup_model_provider(config)
+    save_config(config)
+
+    env = _read_env(tmp_path)
+    reloaded = load_config()
+
+    assert env.get("FIREWORKS_API_KEY") == "fw-key"
+    assert reloaded["model"]["provider"] == "fireworks"
+    assert reloaded["model"]["base_url"] == "https://api.fireworks.ai/inference/v1"
+    assert reloaded["model"]["default"] == "accounts/fireworks/routers/kimi-k2p5-turbo"
 
 
 def test_setup_same_provider_rotation_strategy_saved_for_multi_credential_pool(tmp_path, monkeypatch):

@@ -30,8 +30,6 @@ from hermes_cli.auth import (
     _resolve_zai_base_url,
     _save_auth_store,
     _save_provider_state,
-    read_credential_pool,
-    write_credential_pool,
 )
 
 logger = logging.getLogger(__name__)
@@ -315,7 +313,7 @@ def get_custom_provider_pool_key(base_url: str) -> Optional[str]:
 
 def list_custom_pool_providers() -> List[str]:
     """Return all 'custom:*' pool keys that have entries in auth.json."""
-    pool_data = read_credential_pool(None)
+    pool_data = auth_mod.read_credential_pool(None)
     return sorted(
         key for key in pool_data
         if key.startswith(CUSTOM_POOL_PREFIX)
@@ -387,7 +385,7 @@ class CredentialPool:
                 return
 
     def _persist(self) -> None:
-        write_credential_pool(
+        auth_mod.write_credential_pool(
             self.provider,
             [entry.to_dict() for entry in self._entries],
         )
@@ -1296,7 +1294,7 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
 
 def load_pool(provider: str) -> CredentialPool:
     provider = (provider or "").strip().lower()
-    raw_entries = read_credential_pool(provider)
+    raw_entries = auth_mod.read_credential_pool(provider)
     entries = [PooledCredential.from_dict(provider, payload) for payload in raw_entries]
 
     if provider.startswith(CUSTOM_POOL_PREFIX):
@@ -1312,7 +1310,7 @@ def load_pool(provider: str) -> CredentialPool:
         changed |= _normalize_pool_priorities(provider, entries)
 
     if changed:
-        write_credential_pool(
+        auth_mod.write_credential_pool(
             provider,
             [entry.to_dict() for entry in sorted(entries, key=lambda item: item.priority)],
         )
