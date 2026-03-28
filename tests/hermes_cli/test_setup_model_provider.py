@@ -13,6 +13,10 @@ def _maybe_keep_current_tts(question, choices):
     return len(choices) - 1
 
 
+def _choice_by_label(choices, label):
+    return choices.index(label)
+
+
 def _read_env(home):
     env_path = home / ".env"
     data = {}
@@ -34,6 +38,8 @@ def _clear_provider_env(monkeypatch):
         "OPENROUTER_API_KEY",
         "GITHUB_TOKEN",
         "GH_TOKEN",
+        "FIREWORKS_API_KEY",
+        "FIREWORKS_BASE_URL",
         "GLM_API_KEY",
         "KIMI_API_KEY",
         "MINIMAX_API_KEY",
@@ -244,8 +250,10 @@ def test_setup_copilot_uses_gh_auth_and_saves_provider(tmp_path, monkeypatch):
 
     def fake_prompt_choice(question, choices, default=0):
         if question == "Select your inference provider:":
-            assert choices[14] == "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)"
-            return 14
+            return _choice_by_label(
+                choices,
+                "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)",
+            )
         if question == "Select default model:":
             assert "gpt-4.1" in choices
             assert "gpt-5.4" in choices
@@ -323,8 +331,10 @@ def test_setup_copilot_acp_uses_model_picker_and_saves_provider(tmp_path, monkey
 
     def fake_prompt_choice(question, choices, default=0):
         if question == "Select your inference provider:":
-            assert choices[15] == "GitHub Copilot ACP (spawns `copilot --acp --stdio`)"
-            return 15
+            return _choice_by_label(
+                choices,
+                "GitHub Copilot ACP (spawns `copilot --acp --stdio`)",
+            )
         if question == "Select default model:":
             assert "gpt-4.1" in choices
             assert "gpt-5.4" in choices
@@ -471,3 +481,54 @@ def test_setup_summary_marks_anthropic_auth_as_vision_available(tmp_path, monkey
 
     assert "Vision (image analysis)" in output
     assert "missing run 'hermes setup' to configure" not in output
+
+
+def test_setup_fireworks_fire_pass_sets_router_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    config = load_config()
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select your inference provider:":
+            return _choice_by_label(
+                choices,
+                "Fireworks AI (open models + Fire Pass)",
+            )
+        if question == "Select default model:":
+            return 0
+        if question == "Configure vision:":
+            return len(choices) - 1
+        tts_idx = _maybe_keep_current_tts(question, choices)
+        if tts_idx is not None:
+            return tts_idx
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    def fake_prompt(message, *args, **kwargs):
+        if "Fireworks API key" in message:
+            return "fw-key"
+        raise AssertionError(f"Unexpected prompt call: {message}")
+
+    def fake_prompt_yes_no(question, default=True):
+        if question == "Use Fire Pass model defaults?":
+            return True
+        return False
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", fake_prompt)
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", fake_prompt_yes_no)
+    monkeypatch.setattr("hermes_cli.auth.get_active_provider", lambda: None)
+    monkeypatch.setattr("hermes_cli.auth.detect_external_credentials", lambda: [])
+    monkeypatch.setattr("hermes_cli.auth.get_auth_status", lambda provider_id: {"logged_in": False})
+    monkeypatch.setattr("agent.auxiliary_client.get_available_vision_backends", lambda: [])
+
+    setup_model_provider(config)
+    save_config(config)
+
+    env = _read_env(tmp_path)
+    reloaded = load_config()
+
+    assert env.get("FIREWORKS_API_KEY") == "fw-key"
+    assert reloaded["model"]["provider"] == "fireworks"
+    assert reloaded["model"]["base_url"] == "https://api.fireworks.ai/inference/v1"
+    assert reloaded["model"]["default"] == "accounts/fireworks/routers/kimi-k2p5-turbo"

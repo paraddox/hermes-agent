@@ -433,6 +433,43 @@ def test_cmd_model_falls_back_to_auto_on_invalid_provider(monkeypatch, capsys):
     assert "No change." in output
 
 
+def test_cmd_model_displays_fireworks_active_label(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"model": {"default": "accounts/fireworks/routers/kimi-k2p5-turbo", "provider": "fireworks"}},
+    )
+    monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
+    monkeypatch.setattr("hermes_cli.config.get_env_value", lambda key: "")
+    monkeypatch.setattr("hermes_cli.config.save_env_value", lambda key, value: None)
+    monkeypatch.setattr("hermes_cli.auth.resolve_provider", lambda requested, **kwargs: "fireworks")
+    monkeypatch.setattr(hermes_main, "_prompt_provider_choice", lambda choices: len(choices) - 1)
+
+    hermes_main.cmd_model(SimpleNamespace())
+    output = capsys.readouterr().out
+
+    assert "Active provider:  Fireworks AI" in output
+    assert "No change." in output
+
+
+def test_main_chat_parser_accepts_fireworks_provider(monkeypatch):
+    captured = {}
+
+    def _fake_cmd_chat(args):
+        captured["provider"] = args.provider
+        captured["query"] = args.query
+
+    monkeypatch.setattr(hermes_main, "cmd_chat", _fake_cmd_chat)
+    monkeypatch.setattr(
+        hermes_main.sys,
+        "argv",
+        ["hermes", "chat", "--provider", "fireworks", "-q", "hi"],
+    )
+
+    hermes_main.main()
+
+    assert captured == {"provider": "fireworks", "query": "hi"}
+
+
 def test_model_flow_custom_saves_verified_v1_base_url(monkeypatch, capsys):
     monkeypatch.setattr(
         "hermes_cli.config.get_env_value",

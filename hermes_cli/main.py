@@ -786,6 +786,7 @@ def cmd_model(args):
         "copilot-acp": "GitHub Copilot ACP",
         "copilot": "GitHub Copilot",
         "anthropic": "Anthropic",
+        "fireworks": "Fireworks AI",
         "zai": "Z.AI / GLM",
         "kimi-coding": "Kimi / Moonshot",
         "minimax": "MiniMax",
@@ -823,6 +824,7 @@ def cmd_model(args):
         ("ai-gateway", "AI Gateway (Vercel — 200+ models, pay-per-use)"),
         ("alibaba", "Alibaba Cloud / DashScope Coding (Qwen + multi-provider)"),
         ("huggingface", "Hugging Face Inference Providers (20+ open models)"),
+        ("fireworks", "Fireworks AI (open models + Fire Pass)"),
     ]
 
     # Add user-defined custom providers from config.yaml
@@ -895,7 +897,7 @@ def cmd_model(args):
         _model_flow_anthropic(config, current_model)
     elif selected_provider == "kimi-coding":
         _model_flow_kimi(config, current_model)
-    elif selected_provider in ("zai", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface"):
+    elif selected_provider in ("fireworks", "zai", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface"):
         _model_flow_api_key_provider(config, selected_provider, current_model)
 
 
@@ -1466,6 +1468,12 @@ _PROVIDER_MODELS = {
         "claude-haiku-4.5",
         "gemini-2.5-pro",
         "grok-code-fast-1",
+    ],
+    "fireworks": [
+        "accounts/fireworks/routers/kimi-k2p5-turbo",
+        "accounts/fireworks/models/kimi-k2p5",
+        "accounts/fireworks/models/glm-5",
+        "accounts/fireworks/models/deepseek-v3p1",
     ],
     "zai": [
         "glm-5",
@@ -2049,7 +2057,15 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
     # Providers with large live catalogs (100+ models) use a curated list instead
     # so users see familiar model names rather than an overwhelming dump.
     curated = _PROVIDER_MODELS.get(provider_id, [])
-    if curated and len(curated) >= 8:
+    if provider_id == "fireworks":
+        from hermes_cli.models import provider_model_ids
+
+        model_list = provider_model_ids("fireworks")
+        if model_list:
+            print(f"  Found {len(model_list)} Fireworks model(s)")
+        else:
+            model_list = curated
+    elif curated and len(curated) >= 8:
         # Curated list is substantial — use it directly, skip live probe
         live_models = None
     else:
@@ -2057,22 +2073,30 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
         api_key_for_probe = existing_key or (get_env_value(key_env) if key_env else "")
         live_models = fetch_api_models(api_key_for_probe, effective_base)
 
-    if live_models:
+    if provider_id == "fireworks":
+        if model_list:
+            selected = _prompt_model_selection(model_list, current_model=current_model)
+        else:
+            try:
+                selected = input("Model name: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                selected = None
+    elif live_models:
         model_list = live_models
         print(f"  Found {len(model_list)} model(s) from {pconfig.name} API")
+        selected = _prompt_model_selection(model_list, current_model=current_model)
     else:
         model_list = curated
         if model_list:
             print(f"  Showing {len(model_list)} curated models — use \"Enter custom model name\" for others.")
         # else: no defaults either, will fall through to raw input
-
-    if model_list:
-        selected = _prompt_model_selection(model_list, current_model=current_model)
-    else:
-        try:
-            selected = input("Model name: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            selected = None
+        if model_list:
+            selected = _prompt_model_selection(model_list, current_model=current_model)
+        else:
+            try:
+                selected = input("Model name: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                selected = None
 
     if selected:
         # Clear custom endpoint if set (avoid confusion)
@@ -3215,7 +3239,7 @@ For more help on a command:
     )
     chat_parser.add_argument(
         "--provider",
-        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "huggingface", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode"],
+        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "huggingface", "fireworks", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode"],
         default=None,
         help="Inference provider (default: auto)"
     )

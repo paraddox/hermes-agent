@@ -117,3 +117,167 @@ class TestDetectProviderForModel:
         result = detect_provider_for_model("claude-opus-4-6", "openai-codex")
         assert result is not None
         assert result[0] not in ("nous",)  # nous has claude models but shouldn't be suggested
+
+
+class TestFireworksProviderMetadata:
+    def test_provider_label_present(self):
+        from hermes_cli.models import _PROVIDER_LABELS
+
+        assert _PROVIDER_LABELS["fireworks"] == "Fireworks AI"
+
+    def test_provider_alias_present(self):
+        from hermes_cli.models import _PROVIDER_ALIASES
+
+        assert _PROVIDER_ALIASES["fireworks-ai"] == "fireworks"
+
+    def test_provider_model_ids_include_fire_pass_router(self):
+        from hermes_cli.models import provider_model_ids
+
+        ids = provider_model_ids("fireworks")
+        assert "accounts/fireworks/routers/kimi-k2p5-turbo" in ids
+
+    def test_list_available_providers_includes_fireworks(self):
+        from hermes_cli.models import list_available_providers
+
+        ids = [item["id"] for item in list_available_providers()]
+        assert "fireworks" in ids
+
+    def test_provider_model_ids_combines_fire_pass_and_live_catalog(self, monkeypatch):
+        from hermes_cli.models import provider_model_ids
+
+        monkeypatch.setattr(
+            "hermes_cli.models._fetch_fireworks_models",
+            lambda api_key=None, timeout=5.0: [
+                "accounts/fireworks/models/deepseek-v3p1",
+                "accounts/fireworks/models/glm-5",
+                "accounts/fireworks/routers/kimi-k2p5-turbo",
+            ],
+        )
+        monkeypatch.setattr(
+            "hermes_cli.auth.resolve_api_key_provider_credentials",
+            lambda provider_id: {
+                "provider": provider_id,
+                "api_key": "fw-key",
+                "base_url": "https://api.fireworks.ai/inference/v1",
+                "source": "FIREWORKS_API_KEY",
+            },
+        )
+
+        ids = provider_model_ids("fireworks")
+
+        assert ids[0] == "accounts/fireworks/routers/kimi-k2p5-turbo"
+        assert "accounts/fireworks/models/deepseek-v3p1" in ids
+        assert "accounts/fireworks/models/glm-5" in ids
+        assert ids.count("accounts/fireworks/routers/kimi-k2p5-turbo") == 1
+
+
+class TestFetchFireworksModels:
+    def test_provider_model_ids_fetches_account_scoped_catalog(self, monkeypatch):
+        import io
+        import json
+        from hermes_cli.models import provider_model_ids
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                self.close()
+
+        def _fake_urlopen(req, timeout=5.0):
+            url = req.full_url
+            if url == "https://api.fireworks.ai/v1/accounts?pageSize=200":
+                payload = {
+                    "accounts": [
+                        {"name": "accounts/my-account"},
+                    ]
+                }
+                return _Resp(json.dumps(payload).encode())
+            if url == (
+                "https://api.fireworks.ai/v1/accounts/my-account/models"
+                "?filter=supports_serverless%3Dtrue&pageSize=200"
+            ):
+                payload = {
+                    "models": [
+                        {
+                            "name": "accounts/my-account/models/private-llm",
+                            "kind": "HF_BASE_MODEL",
+                            "status": {"code": "OK"},
+                        }
+                    ]
+                }
+                return _Resp(json.dumps(payload).encode())
+            raise AssertionError(f"Unexpected Fireworks API URL: {url}")
+
+        monkeypatch.setattr(
+            "hermes_cli.auth.resolve_api_key_provider_credentials",
+            lambda provider_id: {
+                "provider": provider_id,
+                "api_key": "fw-key",
+                "base_url": "https://api.fireworks.ai/inference/v1",
+                "source": "FIREWORKS_API_KEY",
+            },
+        )
+        monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+
+        ids = provider_model_ids("fireworks")
+
+        assert "accounts/fireworks/routers/kimi-k2p5-turbo" in ids
+        assert "accounts/my-account/models/private-llm" in ids
+
+    def test_filters_non_llm_and_unhealthy_entries(self, monkeypatch):
+        import io
+        import json
+        from hermes_cli.models import _fetch_fireworks_models
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                self.close()
+
+        def _fake_urlopen(req, timeout=5.0):
+            url = req.full_url
+            if url == "https://api.fireworks.ai/v1/accounts?pageSize=200":
+                payload = {"accounts": [{"name": "accounts/fireworks"}]}
+                return _Resp(json.dumps(payload).encode())
+            if url == (
+                "https://api.fireworks.ai/v1/accounts/fireworks/models"
+                "?filter=supports_serverless%3Dtrue&pageSize=200"
+            ):
+                payload = {
+                    "models": [
+                        {
+                            "name": "accounts/fireworks/models/deepseek-v3p1",
+                            "kind": "HF_BASE_MODEL",
+                            "status": {"code": "OK"},
+                        },
+                        {
+                            "name": "accounts/fireworks/models/flux-kontext-pro",
+                            "kind": "FLUMINA_BASE_MODEL",
+                            "status": {"code": "OK"},
+                        },
+                        {
+                            "name": "accounts/fireworks/models/qwen3-embedding-8b",
+                            "kind": "EMBEDDING_MODEL",
+                            "status": {"code": "OK"},
+                        },
+                        {
+                            "name": "accounts/fireworks/models/gpt-oss-20b",
+                            "kind": "HF_BASE_MODEL",
+                            "status": {"code": "INTERNAL"},
+                        },
+                    ]
+                }
+                return _Resp(json.dumps(payload).encode())
+            raise AssertionError(f"Unexpected Fireworks API URL: {url}")
+
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            _fake_urlopen,
+        )
+
+        ids = _fetch_fireworks_models(api_key="fw-key")
+
+        assert ids == ["accounts/fireworks/models/deepseek-v3p1"]

@@ -52,6 +52,10 @@ def _set_default_model(config: Dict[str, Any], model_name: str) -> None:
     config["model"] = model_cfg
 
 
+_FIREWORKS_FIRE_PASS_MODELS = [
+    "accounts/fireworks/routers/kimi-k2p5-turbo",
+]
+
 # Default model lists per provider — used as fallback when the live
 # /models endpoint can't be reached.
 _DEFAULT_PROVIDER_MODELS = {
@@ -73,6 +77,12 @@ _DEFAULT_PROVIDER_MODELS = {
         "claude-haiku-4.5",
         "gemini-2.5-pro",
         "grok-code-fast-1",
+    ],
+    "fireworks": [
+        *_FIREWORKS_FIRE_PASS_MODELS,
+        "accounts/fireworks/models/kimi-k2p5",
+        "accounts/fireworks/models/glm-5",
+        "accounts/fireworks/models/deepseek-v3p1",
     ],
     "zai": ["glm-5", "glm-4.7", "glm-4.5", "glm-4.5-flash"],
     "kimi-coding": ["kimi-k2.5", "kimi-k2-thinking", "kimi-k2-turbo-preview"],
@@ -141,7 +151,15 @@ def _setup_copilot_reasoning_selection(
         _set_reasoning_effort(config, "none")
 
 
-def _setup_provider_model_selection(config, provider_id, current_model, prompt_choice, prompt_fn):
+def _setup_provider_model_selection(
+    config,
+    provider_id,
+    current_model,
+    prompt_choice,
+    prompt_fn,
+    *,
+    override_models: Optional[list[str]] = None,
+):
     """Model selection for API-key providers with live /models detection.
 
     Tries the provider's /models endpoint first.  Falls back to a
@@ -151,6 +169,7 @@ def _setup_provider_model_selection(config, provider_id, current_model, prompt_c
     from hermes_cli.auth import PROVIDER_REGISTRY, resolve_api_key_provider_credentials
     from hermes_cli.config import get_env_value
     from hermes_cli.models import (
+        _fetch_fireworks_models,
         copilot_model_api_mode,
         fetch_api_models,
         fetch_github_model_catalog,
@@ -190,23 +209,30 @@ def _setup_provider_model_selection(config, provider_id, current_model, prompt_c
         base_url = (get_env_value(base_url_env) if base_url_env else "") or pconfig.inference_base_url
         catalog = None
 
-    # Try live /models endpoint
-    if is_copilot_catalog_provider and catalog:
-        live_models = [item.get("id", "") for item in catalog if item.get("id")]
+    if override_models:
+        provider_models = list(override_models)
     else:
-        live_models = fetch_api_models(api_key, base_url)
+        # Try live /models endpoint
+        if is_copilot_catalog_provider and catalog:
+            live_models = [item.get("id", "") for item in catalog if item.get("id")]
+        elif provider_id == "fireworks":
+            live_models = _fetch_fireworks_models(api_key)
+            if live_models:
+                live_models = list(dict.fromkeys(_FIREWORKS_FIRE_PASS_MODELS + live_models))
+        else:
+            live_models = fetch_api_models(api_key, base_url)
 
-    if live_models:
-        provider_models = live_models
-        print_info(f"Found {len(live_models)} model(s) from {pconfig.name} API")
-    else:
-        fallback_provider_id = "copilot" if provider_id == "copilot-acp" else provider_id
-        provider_models = _DEFAULT_PROVIDER_MODELS.get(fallback_provider_id, [])
-        if provider_models:
-            print_warning(
-                f"Could not auto-detect models from {pconfig.name} API — showing defaults.\n"
-                f"    Use \"Custom model\" if the model you expect isn't listed."
-            )
+        if live_models:
+            provider_models = live_models
+            print_info(f"Found {len(live_models)} model(s) from {pconfig.name} API")
+        else:
+            fallback_provider_id = "copilot" if provider_id == "copilot-acp" else provider_id
+            provider_models = _DEFAULT_PROVIDER_MODELS.get(fallback_provider_id, [])
+            if provider_models:
+                print_warning(
+                    f"Could not auto-detect models from {pconfig.name} API — showing defaults.\n"
+                    f"    Use \"Custom model\" if the model you expect isn't listed."
+                )
 
     model_choices = list(provider_models)
     model_choices.append("Custom model")
@@ -890,6 +916,7 @@ def setup_model_provider(config: dict):
         "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)",
         "GitHub Copilot ACP (spawns `copilot --acp --stdio`)",
         "Hugging Face Inference Providers (20+ open models)",
+        "Fireworks AI (open models + Fire Pass)",
     ]
     if keep_label:
         provider_choices.append(keep_label)
@@ -910,6 +937,7 @@ def setup_model_provider(config: dict):
         None  # "nous", "openai-codex", "openrouter", "custom", or None (keep)
     )
     selected_base_url = None  # deferred until after model selection
+    provider_model_override = None
     nous_models = []  # populated if Nous login succeeds
 
     if provider_idx == 0:  # OpenRouter
@@ -1553,7 +1581,46 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "huggingface", pconfig.inference_base_url)
         selected_base_url = pconfig.inference_base_url
 
-    # else: provider_idx == 17 (Keep current) — only shown when a provider already exists
+    elif provider_idx == 17:  # Fireworks AI
+        selected_provider = "fireworks"
+        print()
+        print_header("Fireworks API Key")
+        pconfig = PROVIDER_REGISTRY["fireworks"]
+        print_info(f"Provider: {pconfig.name}")
+        print_info(f"Base URL: {pconfig.inference_base_url}")
+        print_info("Get your API key at: https://app.fireworks.ai/api-keys")
+        print()
+
+        existing_key = get_env_value("FIREWORKS_API_KEY")
+        if existing_key:
+            print_info(f"Current: {existing_key[:8]}... (configured)")
+            if prompt_yes_no("Update API key?", False):
+                api_key = prompt("  Fireworks API key", password=True)
+                if api_key:
+                    save_env_value("FIREWORKS_API_KEY", api_key)
+                    print_success("Fireworks API key updated")
+        else:
+            api_key = prompt("  Fireworks API key", password=True)
+            if api_key:
+                save_env_value("FIREWORKS_API_KEY", api_key)
+                print_success("Fireworks API key saved")
+            else:
+                print_warning("Skipped - agent won't work without an API key")
+
+        if prompt_yes_no("Use Fire Pass model defaults?", False):
+            provider_model_override = list(_FIREWORKS_FIRE_PASS_MODELS)
+            print_info(
+                "Fire Pass only covers supported Fire Pass router models. "
+                "Other Fireworks models use standard billing."
+            )
+
+        if existing_custom:
+            save_env_value("OPENAI_BASE_URL", "")
+            save_env_value("OPENAI_API_KEY", "")
+        _set_model_provider(config, "fireworks", pconfig.inference_base_url)
+        selected_base_url = pconfig.inference_base_url
+
+    # else: provider_idx == 18 (Keep current) — only shown when a provider already exists
     # Normalize "keep current" to an explicit provider so downstream logic
     # doesn't fall back to the generic OpenRouter/static-model path.
     if selected_provider is None:
@@ -1734,10 +1801,11 @@ def setup_model_provider(config: dict):
             model_cfg = _model_config_dict(config)
             model_cfg["api_mode"] = "chat_completions"
             config["model"] = model_cfg
-        elif selected_provider in ("copilot", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "ai-gateway", "opencode-zen", "opencode-go", "alibaba"):
+        elif selected_provider in ("copilot", "fireworks", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "ai-gateway", "opencode-zen", "opencode-go", "alibaba"):
             _setup_provider_model_selection(
                 config, selected_provider, current_model,
                 prompt_choice, prompt,
+                override_models=provider_model_override,
             )
         elif selected_provider == "anthropic":
             # Try live model list first, fall back to static
@@ -1795,7 +1863,7 @@ def setup_model_provider(config: dict):
     # Write provider+base_url to config.yaml only after model selection is complete.
     # This prevents a race condition where the gateway picks up a new provider
     # before the model name has been updated to match.
-    if selected_provider in ("copilot-acp", "copilot", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "anthropic") and selected_base_url is not None:
+    if selected_provider in ("copilot-acp", "copilot", "fireworks", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "anthropic") and selected_base_url is not None:
         _update_config_for_provider(selected_provider, selected_base_url)
 
     save_config(config)

@@ -1,4 +1,4 @@
-"""Tests for _setup_provider_model_selection and the zai/kimi/minimax branch.
+"""Tests for _setup_provider_model_selection and the direct API-key provider branches.
 
 Regression test for the is_coding_plan NameError that crashed setup when
 selecting zai, kimi-coding, minimax, or minimax-cn providers.
@@ -19,6 +19,7 @@ def mock_provider_registry():
 
     return {
         "zai": FakePConfig("ZAI", ["ZAI_API_KEY"], "ZAI_BASE_URL", "https://api.zai.example"),
+        "fireworks": FakePConfig("Fireworks AI", ["FIREWORKS_API_KEY"], "FIREWORKS_BASE_URL", "https://api.fireworks.ai/inference/v1"),
         "kimi-coding": FakePConfig("Kimi Coding", ["KIMI_API_KEY"], "KIMI_BASE_URL", "https://api.kimi.example"),
         "minimax": FakePConfig("MiniMax", ["MINIMAX_API_KEY"], "MINIMAX_BASE_URL", "https://api.minimax.example"),
         "minimax-cn": FakePConfig("MiniMax CN", ["MINIMAX_API_KEY"], "MINIMAX_CN_BASE_URL", "https://api.minimax-cn.example"),
@@ -31,6 +32,7 @@ class TestSetupProviderModelSelection:
 
     @pytest.mark.parametrize("provider_id,expected_defaults", [
         ("zai", ["glm-5", "glm-4.7", "glm-4.5", "glm-4.5-flash"]),
+        ("fireworks", ["accounts/fireworks/routers/kimi-k2p5-turbo", "accounts/fireworks/models/kimi-k2p5"]),
         ("kimi-coding", ["kimi-k2.5", "kimi-k2-thinking", "kimi-k2-turbo-preview"]),
         ("minimax", ["MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2.1"]),
         ("minimax-cn", ["MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2.1"]),
