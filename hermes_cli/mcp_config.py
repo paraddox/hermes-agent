@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_cli.config import (
     load_config,
-    save_config,
+    save_user_config as save_config,
     get_env_value,
     save_env_value,
     get_hermes_home,  # noqa: F401 — used by test mocks

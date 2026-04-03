@@ -1,9 +1,11 @@
 """Tests for hermes_cli.tools_config platform tool persistence."""
 
+import yaml
 from unittest.mock import patch
 
 from hermes_cli.tools_config import (
     _configure_provider,
+    _configure_simple_requirements,
     _get_platform_tools,
     _platform_toolset_summary,
     _save_platform_tools,
@@ -141,6 +143,69 @@ def test_save_platform_tools_handles_invalid_existing_config():
 
     saved_toolsets = config["platform_toolsets"]["cli"]
     assert "web" in saved_toolsets
+
+
+def test_save_platform_tools_preserves_raw_user_config(tmp_path, monkeypatch):
+    """Saving tool selections must not rewrite unrelated defaults into config.yaml."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli.config import load_config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "custom_section": {"keep": True},
+                "compression": {"enabled": False},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config()
+    _save_platform_tools(config, "cli", {"web", "terminal"})
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["custom_section"] == {"keep": True}
+    assert saved["compression"] == {"enabled": False}
+    assert saved["platform_toolsets"]["cli"] == ["terminal", "web"]
+    assert "browser" not in saved
+    assert "display" not in saved
+    assert "terminal" not in saved
+
+
+def test_save_platform_tools_preserves_raw_env_placeholders(tmp_path, monkeypatch):
+    """Saving tool selections must not expand unrelated env placeholders."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("GLM_API_KEY", "secret-key-123")
+
+    from hermes_cli.config import load_config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "mcp_servers": {
+                    "zread": {
+                        "url": "https://example.com",
+                        "headers": {"Authorization": "Bearer ${GLM_API_KEY}"},
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config()
+    _save_platform_tools(config, "cli", {"web", "terminal"})
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert (
+        saved["mcp_servers"]["zread"]["headers"]["Authorization"]
+        == "Bearer ${GLM_API_KEY}"
+    )
 
 
 def test_save_platform_tools_does_not_preserve_platform_default_toolsets():
@@ -314,6 +379,7 @@ def test_first_install_nous_auto_configures_managed_defaults(monkeypatch):
         "hermes_cli.tools_config._prompt_toolset_checklist",
         lambda *args, **kwargs: {"web", "image_gen", "tts", "browser"},
     )
+    monkeypatch.setattr("hermes_cli.tools_config._get_enabled_platforms", lambda: ["cli"])
     monkeypatch.setattr("hermes_cli.tools_config.save_config", lambda config: None)
     monkeypatch.setattr(
         "hermes_cli.nous_subscription.get_nous_auth_status",
@@ -333,6 +399,49 @@ def test_first_install_nous_auto_configures_managed_defaults(monkeypatch):
     assert config["browser"]["cloud_provider"] == "browserbase"
     assert configured == []
 
+
+def test_vision_reconfig_preserves_raw_user_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("GLM_API_KEY", "secret-key-123")
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "mcp_servers": {
+                    "zread": {
+                        "config": {
+                            "headers": {
+                                "Authorization": "Bearer ${GLM_API_KEY}",
+                            }
+                        }
+                    }
+                },
+                "custom_section": {"keep": True},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("hermes_cli.tools_config._toolset_has_keys", lambda _ts: False)
+    monkeypatch.setattr("hermes_cli.tools_config._prompt_choice", lambda *_args, **_kwargs: 1)
+    prompt_values = iter(["https://custom.example/v1", "api-key"])
+    monkeypatch.setattr(
+        "hermes_cli.tools_config._prompt",
+        lambda *_args, **_kwargs: next(prompt_values),
+    )
+
+    _configure_simple_requirements("vision")
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["auxiliary"]["vision"]["base_url"] == "https://custom.example/v1"
+    assert saved["custom_section"] == {"keep": True}
+    assert (
+        saved["mcp_servers"]["zread"]["config"]["headers"]["Authorization"]
+        == "Bearer ${GLM_API_KEY}"
+    )
+    assert "browser" not in saved
 # ── Platform / toolset consistency ────────────────────────────────────────────
 
 

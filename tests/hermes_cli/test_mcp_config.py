@@ -14,6 +14,7 @@ from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
+import yaml
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +385,29 @@ class TestConfigHelpers:
 
         assert _env_key_for_server("ink") == "MCP_INK_API_KEY"
         assert _env_key_for_server("my-server") == "MCP_MY_SERVER_API_KEY"
+
+    def test_save_mcp_server_preserves_raw_user_config(self, tmp_path):
+        from hermes_cli.mcp_config import _save_mcp_server
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "custom_section": {"keep": True},
+                    "compression": {"enabled": False},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        _save_mcp_server("exa", {"url": "https://mcp.exa.ai/mcp"})
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["custom_section"] == {"keep": True}
+        assert saved["compression"] == {"enabled": False}
+        assert saved["mcp_servers"]["exa"]["url"] == "https://mcp.exa.ai/mcp"
+        assert "terminal" not in saved
 
 
 # ---------------------------------------------------------------------------

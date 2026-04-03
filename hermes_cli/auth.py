@@ -35,9 +35,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
-import yaml
-
-from hermes_cli.config import get_hermes_home, get_config_path
+from hermes_cli.config import (
+    get_hermes_home,
+    get_config_path,
+    load_raw_config,
+    save_user_config,
+)
 from hermes_constants import OPENROUTER_BASE_URL
 
 logger = logging.getLogger(__name__)
@@ -2081,15 +2084,7 @@ def _update_config_for_provider(
     # Update config.yaml model section
     config_path = get_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
-
-    config: Dict[str, Any] = {}
-    if config_path.exists():
-        try:
-            loaded = yaml.safe_load(config_path.read_text()) or {}
-            if isinstance(loaded, dict):
-                config = loaded
-        except Exception:
-            config = {}
+    config = load_raw_config()
 
     current_model = config.get("model")
     if isinstance(current_model, dict):
@@ -2116,7 +2111,7 @@ def _update_config_for_provider(
 
     config["model"] = model_cfg
 
-    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+    save_user_config(config)
     return config_path
 
 
@@ -2126,20 +2121,14 @@ def _reset_config_provider() -> Path:
     if not config_path.exists():
         return config_path
 
-    try:
-        config = yaml.safe_load(config_path.read_text()) or {}
-    except Exception:
-        return config_path
-
-    if not isinstance(config, dict):
-        return config_path
+    config = load_raw_config()
 
     model = config.get("model")
     if isinstance(model, dict):
         model["provider"] = "auto"
         if "base_url" in model:
             model["base_url"] = OPENROUTER_BASE_URL
-    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+    save_user_config(config)
     return config_path
 
 
@@ -2226,7 +2215,7 @@ def _save_model_choice(model_id: str) -> None:
     The model is stored in config.yaml only — NOT in .env.  This avoids
     conflicts in multi-agent setups where env vars would stomp each other.
     """
-    from hermes_cli.config import save_config, load_config
+    from hermes_cli.config import load_config, save_user_config
 
     config = load_config()
     # Always use dict format so provider/base_url can be stored alongside
@@ -2234,7 +2223,7 @@ def _save_model_choice(model_id: str) -> None:
         config["model"]["default"] = model_id
     else:
         config["model"] = {"default": model_id}
-    save_config(config)
+    save_user_config(config)
 
 
 def login_command(args) -> None:

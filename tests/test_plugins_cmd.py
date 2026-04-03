@@ -348,6 +348,44 @@ class TestCmdList:
         cmd_list()
 
 
+# ── config preservation regression ───────────────────────────────────────
+
+
+class TestPluginConfigPersistence:
+    """Plugin enable/disable should preserve raw user config values."""
+
+    def test_cmd_disable_preserves_raw_placeholders(self, tmp_path, monkeypatch):
+        from hermes_cli.plugins_cmd import cmd_disable
+
+        hermes_home = tmp_path / ".hermes"
+        plugins_dir = hermes_home / "plugins"
+        plugin_dir = plugins_dir / "demo-plugin"
+        plugin_dir.mkdir(parents=True)
+
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "custom_section:\n"
+            "  keep: true\n"
+            "mcp_servers:\n"
+            "  zread:\n"
+            "    headers:\n"
+            "      Authorization: Bearer ${GLM_API_KEY}\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("GLM_API_KEY", "secret-key-123")
+
+        cmd_disable("demo-plugin")
+
+        saved = config_path.read_text(encoding="utf-8")
+        assert "Authorization: Bearer ${GLM_API_KEY}" in saved
+        assert "terminal:" not in saved
+        assert "plugins:" in saved
+        assert "disabled:" in saved
+        assert "- demo-plugin" in saved
+
+
 # ── _copy_example_files tests ─────────────────────────────────────────────────
 
 

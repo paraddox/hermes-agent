@@ -17,7 +17,10 @@ from typing import Dict, List, Optional, Set
 
 
 from hermes_cli.config import (
-    load_config, save_config, get_env_value, save_env_value,
+    get_env_value,
+    load_config,
+    save_env_value,
+    save_user_config as save_config,
 )
 from hermes_cli.colors import Colors, color
 from hermes_cli.nous_subscription import (
@@ -1108,11 +1111,11 @@ def _configure_simple_requirements(ts_key: str):
             if api_key and api_key.strip():
                 save_env_value("OPENAI_API_KEY", api_key.strip())
                 # Save vision base URL to config (not .env — only secrets go there)
-                from hermes_cli.config import load_config, save_config
-                _cfg = load_config()
+                from hermes_cli.config import load_raw_config, save_user_config
+                _cfg = load_raw_config()
                 _aux = _cfg.setdefault("auxiliary", {}).setdefault("vision", {})
                 _aux["base_url"] = base_url
-                save_config(_cfg)
+                save_user_config(_cfg)
                 if "api.openai.com" in base_url.lower():
                     save_env_value("AUXILIARY_VISION_MODEL", "gpt-4o-mini")
                 _print_success("    Saved")
@@ -1306,7 +1309,7 @@ def tools_command(args=None, first_install: bool = False, config: dict = None):
             prompt for API keys on all enabled tools that need them.
         config: Optional config dict to use.  When called from the setup
             wizard, the wizard passes its own dict so that platform_toolsets
-            are written into it and survive the wizard's final save_config().
+            are written into it and survive the wizard's final raw-preserving save.
     """
     if config is None:
         config = load_config()

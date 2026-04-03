@@ -143,7 +143,7 @@ class TestOfferOpenclawMigration:
             patch.object(setup_mod, "prompt_yes_no", return_value=True),
             patch.object(setup_mod, "get_config_path", return_value=config_path),
             patch.object(setup_mod, "load_config", return_value={"agent": {}}),
-            patch.object(setup_mod, "save_config") as mock_save,
+            patch.object(setup_mod, "save_user_config") as mock_save,
             patch(
                 "importlib.util.spec_from_file_location",
                 side_effect=RuntimeError("stop early"),
@@ -151,7 +151,7 @@ class TestOfferOpenclawMigration:
         ):
             setup_mod._offer_openclaw_migration(hermes_home)
 
-        # save_config should have been called to bootstrap the file
+        # save_user_config should have been called to bootstrap the file
         mock_save.assert_called_once_with({"agent": {}})
 
 

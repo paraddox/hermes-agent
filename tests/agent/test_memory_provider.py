@@ -1,8 +1,10 @@
 """Tests for the memory provider interface, manager, and builtin provider."""
 
 import json
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
+import yaml
 
 from agent.memory_provider import MemoryProvider
 from agent.memory_manager import MemoryManager
@@ -542,6 +544,48 @@ class TestPluginMemoryDiscovery:
         assert p is not None
         assert p.name == "holographic"
         assert p.is_available()
+
+    def test_holographic_save_config_preserves_raw_user_config(self, tmp_path, monkeypatch):
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("GLM_API_KEY", "secret-key-123")
+
+        config_path = home / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "mcp_servers": {
+                        "zread": {
+                            "config": {
+                                "headers": {
+                                    "Authorization": "Bearer ${GLM_API_KEY}",
+                                }
+                            }
+                        }
+                    },
+                    "custom_section": {"keep": True},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        from plugins.memory import load_memory_provider
+
+        provider = load_memory_provider("holographic")
+        assert provider is not None
+
+        provider.save_config({"db_path": "memory_store.db"}, str(home))
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        assert saved["plugins"]["hermes-memory-store"]["db_path"] == "memory_store.db"
+        assert saved["custom_section"] == {"keep": True}
+        assert (
+            saved["mcp_servers"]["zread"]["config"]["headers"]["Authorization"]
+            == "Bearer ${GLM_API_KEY}"
+        )
+        assert "browser" not in saved
 
     def test_load_nonexistent_returns_none(self):
         """load_memory_provider returns None for unknown names."""
