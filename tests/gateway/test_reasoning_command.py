@@ -120,6 +120,33 @@ class TestReasoningCommand:
         assert runner._reasoning_config == {"enabled": True, "effort": "low"}
         assert "takes effect on next message" in result
 
+    @pytest.mark.asyncio
+    async def test_handle_reasoning_command_uses_shared_config_writer(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "agent:\n"
+            "  reasoning_effort: medium\n"
+            "mcp_servers:\n"
+            "  zread:\n"
+            "    headers:\n"
+            "      Authorization: Bearer ${GLM_API_KEY}\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        monkeypatch.delenv("HERMES_REASONING_EFFORT", raising=False)
+
+        runner = _make_runner()
+        runner._reasoning_config = {"enabled": True, "effort": "medium"}
+
+        await runner._handle_reasoning_command(_make_event("/reasoning high"))
+
+        saved_text = config_path.read_text(encoding="utf-8")
+        assert "Authorization: Bearer ${GLM_API_KEY}" in saved_text
+        assert "# ── Security" in saved_text
+
     def test_run_agent_reloads_reasoning_config_per_message(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()

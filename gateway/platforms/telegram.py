@@ -358,9 +358,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 logger.warning("[%s] Config file not found at %s, cannot persist thread_id", self.name, config_path)
                 return
 
-            import yaml as _yaml
-            with open(config_path, "r") as f:
-                config = _yaml.safe_load(f) or {}
+            from hermes_cli.config import load_raw_config, save_user_config
+            config = load_raw_config(config_path=config_path)
 
             # Navigate to platforms.telegram.extra.dm_topics
             dm_topics = (
@@ -383,8 +382,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         break
 
             if changed:
-                with open(config_path, "w") as f:
-                    _yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+                save_user_config(config, config_path=config_path)
                 logger.info(
                     "[%s] Persisted thread_id=%s for topic '%s' in config.yaml",
                     self.name, thread_id, topic_name,

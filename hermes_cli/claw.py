@@ -15,7 +15,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from hermes_cli.config import get_hermes_home, get_config_path, load_config, save_config
+from hermes_cli.config import get_hermes_home, get_config_path, load_config, save_user_config
 from hermes_constants import get_optional_skills_dir
 from hermes_cli.setup import (
     Colors,
@@ -262,7 +262,7 @@ def _cmd_migrate(args):
     # Ensure config.yaml exists before migration tries to read it
     config_path = get_config_path()
     if not config_path.exists():
-        save_config(load_config())
+        save_user_config(load_config())
 
     # Load and run the migration
     try:

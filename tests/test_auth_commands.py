@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from datetime import datetime, timezone
+import yaml
 
 import pytest
 
@@ -657,3 +658,46 @@ def test_auth_remove_manual_entry_does_not_touch_env(tmp_path, monkeypatch):
 
     # .env should be untouched
     assert env_path.read_text() == "SOME_KEY=some-value\n"
+
+
+def test_interactive_strategy_preserves_raw_user_config(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("GLM_API_KEY", "secret-key-123")
+
+    config_path = hermes_home / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "mcp_servers": {
+                    "zread": {
+                        "config": {
+                            "headers": {
+                                "Authorization": "Bearer ${GLM_API_KEY}",
+                            }
+                        }
+                    }
+                },
+                "custom_section": {"keep": True},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    from hermes_cli.auth_commands import _interactive_strategy
+
+    monkeypatch.setattr("hermes_cli.auth_commands._pick_provider", lambda _prompt: "openrouter")
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "1")
+
+    _interactive_strategy()
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["credential_pool_strategies"]["openrouter"] == "fill_first"
+    assert saved["custom_section"] == {"keep": True}
+    assert (
+        saved["mcp_servers"]["zread"]["config"]["headers"]["Authorization"]
+        == "Bearer ${GLM_API_KEY}"
+    )
+    assert "browser" not in saved

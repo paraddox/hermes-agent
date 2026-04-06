@@ -397,12 +397,13 @@ def _get_disabled_set() -> set:
 
 def _save_disabled_set(disabled: set) -> None:
     """Write the disabled plugins list to config.yaml."""
-    from hermes_cli.config import load_config, save_config
-    config = load_config()
+    from hermes_cli.config import load_raw_config, save_user_config
+
+    config = load_raw_config()
     if "plugins" not in config:
         config["plugins"] = {}
     config["plugins"]["disabled"] = sorted(disabled)
-    save_config(config)
+    save_user_config(config)
 
 
 def cmd_enable(name: str) -> None:

@@ -1,4 +1,5 @@
 """Tests for hermes_cli/skills_config.py and skills_tool disabled filtering."""
+import yaml
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -74,6 +75,31 @@ class TestSaveDisabledSkills:
         save_disabled_skills(config, {"skill-x"})
         assert "skills" in config
         assert "disabled" in config["skills"]
+
+    def test_save_disabled_skills_preserves_raw_user_config(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.config import load_config
+        from hermes_cli.skills_config import save_disabled_skills
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "custom_section": {"keep": True},
+                    "compression": {"enabled": False},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        save_disabled_skills(load_config(), {"skill-a"})
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["custom_section"] == {"keep": True}
+        assert saved["compression"] == {"enabled": False}
+        assert saved["skills"]["disabled"] == ["skill-a"]
+        assert "terminal" not in saved
 
 
 # ---------------------------------------------------------------------------

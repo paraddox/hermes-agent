@@ -5,6 +5,7 @@ from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 from hermes_cli import claw as claw_mod
 
@@ -255,7 +256,7 @@ class TestCmdMigrate:
             patch.object(claw_mod, "_find_migration_script", return_value=script),
             patch.object(claw_mod, "_load_migration_module", return_value=fake_mod),
             patch.object(claw_mod, "get_config_path", return_value=tmp_path / "config.yaml"),
-            patch.object(claw_mod, "save_config"),
+            patch.object(claw_mod, "save_user_config"),
             patch.object(claw_mod, "load_config", return_value={}),
         ):
             claw_mod._cmd_migrate(args)
@@ -263,6 +264,39 @@ class TestCmdMigrate:
         captured = capsys.readouterr()
         assert "Dry Run Results" in captured.out
         assert "5 skipped" in captured.out
+
+    def test_bootstraps_minimal_user_config_when_missing(self, tmp_path):
+        openclaw_dir = tmp_path / ".openclaw"
+        openclaw_dir.mkdir()
+        config_path = tmp_path / "config.yaml"
+
+        fake_mod = ModuleType("openclaw_to_hermes")
+        fake_mod.resolve_selected_options = MagicMock(return_value=set())
+        fake_migrator = MagicMock()
+        fake_migrator.migrate.return_value = {
+            "summary": {"migrated": 0, "skipped": 0, "conflict": 0, "error": 0},
+            "items": [],
+        }
+        fake_mod.Migrator = MagicMock(return_value=fake_migrator)
+
+        args = Namespace(
+            source=str(openclaw_dir),
+            dry_run=True, preset="full", overwrite=False,
+            migrate_secrets=False, workspace_target=None,
+            skill_conflict="skip", yes=False,
+        )
+
+        with (
+            patch.dict("os.environ", {"HERMES_HOME": str(tmp_path)}, clear=False),
+            patch.object(claw_mod, "_find_migration_script", return_value=tmp_path / "s.py"),
+            patch.object(claw_mod, "_load_migration_module", return_value=fake_mod),
+        ):
+            claw_mod._cmd_migrate(args)
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "_config_version" in saved
+        assert "terminal" not in saved
+        assert "browser" not in saved
 
     def test_execute_with_confirmation(self, tmp_path, capsys):
         openclaw_dir = tmp_path / ".openclaw"
@@ -329,7 +363,7 @@ class TestCmdMigrate:
             patch.object(claw_mod, "_find_migration_script", return_value=tmp_path / "s.py"),
             patch.object(claw_mod, "_load_migration_module", return_value=fake_mod),
             patch.object(claw_mod, "get_config_path", return_value=tmp_path / "config.yaml"),
-            patch.object(claw_mod, "save_config"),
+            patch.object(claw_mod, "save_user_config"),
             patch.object(claw_mod, "load_config", return_value={}),
             patch.object(claw_mod, "_offer_source_archival") as mock_archival,
         ):
@@ -363,7 +397,7 @@ class TestCmdMigrate:
             patch.object(claw_mod, "_find_migration_script", return_value=tmp_path / "s.py"),
             patch.object(claw_mod, "_load_migration_module", return_value=fake_mod),
             patch.object(claw_mod, "get_config_path", return_value=tmp_path / "config.yaml"),
-            patch.object(claw_mod, "save_config"),
+            patch.object(claw_mod, "save_user_config"),
             patch.object(claw_mod, "load_config", return_value={}),
             patch.object(claw_mod, "_offer_source_archival") as mock_archival,
         ):
@@ -442,7 +476,7 @@ class TestCmdMigrate:
             patch.object(claw_mod, "_find_migration_script", return_value=tmp_path / "s.py"),
             patch.object(claw_mod, "_load_migration_module", side_effect=RuntimeError("boom")),
             patch.object(claw_mod, "get_config_path", return_value=config_path),
-            patch.object(claw_mod, "save_config"),
+            patch.object(claw_mod, "save_user_config"),
             patch.object(claw_mod, "load_config", return_value={}),
         ):
             claw_mod._cmd_migrate(args)
@@ -476,7 +510,7 @@ class TestCmdMigrate:
             patch.object(claw_mod, "_find_migration_script", return_value=tmp_path / "s.py"),
             patch.object(claw_mod, "_load_migration_module", return_value=fake_mod),
             patch.object(claw_mod, "get_config_path", return_value=tmp_path / "config.yaml"),
-            patch.object(claw_mod, "save_config"),
+            patch.object(claw_mod, "save_user_config"),
             patch.object(claw_mod, "load_config", return_value={}),
         ):
             claw_mod._cmd_migrate(args)

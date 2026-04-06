@@ -85,6 +85,32 @@ class TestVerboseCommand:
         assert saved["display"]["tool_progress"] == "verbose"
 
     @pytest.mark.asyncio
+    async def test_enabled_cycles_mode_uses_shared_config_writer(self, tmp_path, monkeypatch):
+        """Gateway verbose saves should keep the shared config scaffold."""
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "display:\n"
+            "  tool_progress_command: true\n"
+            "  tool_progress: all\n"
+            "mcp_servers:\n"
+            "  zread:\n"
+            "    headers:\n"
+            "      Authorization: Bearer ${GLM_API_KEY}\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+
+        runner = _make_runner()
+        await runner._handle_verbose_command(_make_event())
+
+        saved_text = config_path.read_text(encoding="utf-8")
+        assert "Authorization: Bearer ${GLM_API_KEY}" in saved_text
+        assert "# ── Security" in saved_text
+
+    @pytest.mark.asyncio
     async def test_cycles_through_all_modes(self, tmp_path, monkeypatch):
         """Calling /verbose repeatedly cycles through all four modes."""
         hermes_home = tmp_path / "hermes"

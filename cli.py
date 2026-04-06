@@ -1082,33 +1082,41 @@ def save_config_value(key_path: str, value: any) -> bool:
     try:
         # Ensure parent directory exists (for ~/.hermes/config.yaml on first use)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Load existing config
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f) or {}
+
+        if config_path == user_config_path:
+            from hermes_cli.config import load_raw_config, save_raw_config
+
+            config = load_raw_config(config_path=config_path)
+            keys = key_path.split('.')
+            current = config
+            for key in keys[:-1]:
+                if key not in current or not isinstance(current[key], dict):
+                    current[key] = {}
+                current = current[key]
+            current[keys[-1]] = value
+            save_raw_config(config, config_path=config_path)
         else:
-            config = {}
-        
-        # Navigate to the key and set value
-        keys = key_path.split('.')
-        current = config
-        for key in keys[:-1]:
-            if key not in current or not isinstance(current[key], dict):
-                current[key] = {}
-            current = current[key]
-        current[keys[-1]] = value
-        
-        # Save back atomically — write to temp file + fsync + os.replace
-        # so an interrupt never leaves config.yaml truncated or empty.
-        from utils import atomic_yaml_write
-        atomic_yaml_write(config_path, config)
-        
-        # Enforce owner-only permissions on config files (contain API keys)
-        try:
-            os.chmod(config_path, 0o600)
-        except (OSError, NotImplementedError):
-            pass
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f) or {}
+            else:
+                config = {}
+
+            keys = key_path.split('.')
+            current = config
+            for key in keys[:-1]:
+                if key not in current or not isinstance(current[key], dict):
+                    current[key] = {}
+                current = current[key]
+            current[keys[-1]] = value
+
+            from utils import atomic_yaml_write
+            atomic_yaml_write(config_path, config)
+
+            try:
+                os.chmod(config_path, 0o600)
+            except (OSError, NotImplementedError):
+                pass
         
         return True
     except Exception as e:

@@ -1,8 +1,10 @@
 """Tests for the memory provider interface, manager, and builtin provider."""
 
 import json
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
+import yaml
 
 from agent.memory_provider import MemoryProvider
 from agent.memory_manager import MemoryManager
@@ -542,6 +544,191 @@ class TestPluginMemoryDiscovery:
         assert p is not None
         assert p.name == "holographic"
         assert p.is_available()
+
+    def test_holographic_save_config_preserves_raw_user_config(self, tmp_path, monkeypatch):
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("GLM_API_KEY", "secret-key-123")
+
+        config_path = home / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "mcp_servers": {
+                        "zread": {
+                            "config": {
+                                "headers": {
+                                    "Authorization": "Bearer ${GLM_API_KEY}",
+                                }
+                            }
+                        }
+                    },
+                    "custom_section": {"keep": True},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        from plugins.memory import load_memory_provider
+
+        provider = load_memory_provider("holographic")
+        assert provider is not None
+
+        provider.save_config({"db_path": "memory_store.db"}, str(home))
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        assert saved["plugins"]["hermes-memory-store"]["db_path"] == "memory_store.db"
+        assert saved["custom_section"] == {"keep": True}
+        assert (
+            saved["mcp_servers"]["zread"]["config"]["headers"]["Authorization"]
+            == "Bearer ${GLM_API_KEY}"
+        )
+        assert "browser" not in saved
+
+    def test_memory_setup_builtin_preserves_raw_user_config(self, tmp_path, monkeypatch):
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("GLM_API_KEY", "secret-key-123")
+
+        config_path = home / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "compression": {"threshold": 0.8},
+                    "mcp_servers": {
+                        "zread": {
+                            "config": {
+                                "headers": {
+                                    "Authorization": "Bearer ${GLM_API_KEY}",
+                                }
+                            }
+                        }
+                    },
+                    "custom_section": {"keep": True},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        import hermes_cli.memory_setup as memory_setup
+
+        class _Provider:
+            pass
+
+        monkeypatch.setattr(
+            memory_setup,
+            "_get_available_providers",
+            lambda: [("dummy", "desc", _Provider())],
+        )
+        monkeypatch.setattr(memory_setup, "_curses_select", lambda *a, **kw: 1)
+
+        memory_setup.cmd_setup(None)
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        assert saved["custom_section"] == {"keep": True}
+        assert saved.get("memory", {}) == {}
+        assert (
+            saved["mcp_servers"]["zread"]["config"]["headers"]["Authorization"]
+            == "Bearer ${GLM_API_KEY}"
+        )
+        assert "terminal" not in saved
+
+    def test_honcho_setup_auto_enable_preserves_raw_user_config(self, tmp_path, monkeypatch):
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("GLM_API_KEY", "secret-key-123")
+
+        config_path = home / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "compression": {"threshold": 0.8},
+                    "mcp_servers": {
+                        "zread": {
+                            "config": {
+                                "headers": {
+                                    "Authorization": "Bearer ${GLM_API_KEY}",
+                                }
+                            }
+                        }
+                    },
+                    "custom_section": {"keep": True},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        import plugins.memory.honcho.cli as honcho_cli
+
+        prompt_values = iter(
+            [
+                "local",
+                "http://localhost:8000",
+                "user",
+                "hermes",
+                "hermes",
+                "directional",
+                "async",
+                "hybrid",
+                "per-directory",
+            ]
+        )
+        fake_cfg = {
+            "host": {
+                "peerName": "user",
+                "aiPeer": "hermes",
+                "workspace": "hermes",
+                "observationMode": "directional",
+                "writeFrequency": "async",
+                "recallMode": "hybrid",
+                "sessionStrategy": "per-directory",
+            }
+        }
+        fake_client_cfg = type(
+            "FakeHonchoClientConfig",
+            (),
+            {
+                "resolve_session_name": lambda self: "s",
+                "workspace_id": "w",
+                "peer_name": "u",
+                "ai_peer": "a",
+                "observation_mode": "o",
+                "write_frequency": "async",
+                "recall_mode": "hybrid",
+                "session_strategy": "per-directory",
+            },
+        )
+
+        monkeypatch.setattr(honcho_cli, "_read_config", lambda: fake_cfg)
+        monkeypatch.setattr(
+            honcho_cli,
+            "_prompt",
+            lambda *a, **kw: next(prompt_values),
+        )
+        monkeypatch.setattr(honcho_cli, "_write_config", lambda cfg: None)
+        monkeypatch.setattr("plugins.memory.honcho.client.reset_honcho_client", lambda: None)
+        monkeypatch.setattr("plugins.memory.honcho.client.get_honcho_client", lambda cfg: object())
+        monkeypatch.setattr(
+            "plugins.memory.honcho.client.HonchoClientConfig.from_global_config",
+            lambda host=None: fake_client_cfg(),
+        )
+
+        honcho_cli.cmd_setup(type("Args", (), {})())
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        assert saved["custom_section"] == {"keep": True}
+        assert saved["memory"]["provider"] == "honcho"
+        assert (
+            saved["mcp_servers"]["zread"]["config"]["headers"]["Authorization"]
+            == "Bearer ${GLM_API_KEY}"
+        )
+        assert "terminal" not in saved
 
     def test_load_nonexistent_returns_none(self):
         """load_memory_provider returns None for unknown names."""

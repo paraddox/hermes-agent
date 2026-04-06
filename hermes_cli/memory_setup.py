@@ -252,7 +252,7 @@ def _get_available_providers() -> list:
 
 def cmd_setup_provider(provider_name: str) -> None:
     """Run memory setup for a specific provider, skipping the picker."""
-    from hermes_cli.config import load_config, save_config
+    from hermes_cli.config import load_raw_config, save_user_config
 
     providers = _get_available_providers()
     match = None
@@ -270,7 +270,7 @@ def cmd_setup_provider(provider_name: str) -> None:
 
     _install_dependencies(name)
 
-    config = load_config()
+    config = load_raw_config()
     if not isinstance(config.get("memory"), dict):
         config["memory"] = {}
 
@@ -281,14 +281,14 @@ def cmd_setup_provider(provider_name: str) -> None:
 
     # Fallback: generic schema-based setup (same as cmd_setup)
     config["memory"]["provider"] = name
-    save_config(config)
+    save_user_config(config)
     print(f"\n  Memory provider: {name}")
     print(f"  Activation saved to config.yaml\n")
 
 
 def cmd_setup(args) -> None:
     """Interactive memory provider setup wizard."""
-    from hermes_cli.config import load_config, save_config
+    from hermes_cli.config import load_raw_config, save_user_config
 
     providers = _get_available_providers()
 
@@ -306,14 +306,14 @@ def cmd_setup(args) -> None:
     builtin_idx = len(items) - 1
     selected = _curses_select("Memory provider setup", items, default=builtin_idx)
 
-    config = load_config()
+    config = load_raw_config()
     if not isinstance(config.get("memory"), dict):
         config["memory"] = {}
 
     # Built-in only
     if selected >= len(providers) or selected < 0:
         config["memory"]["provider"] = ""
-        save_config(config)
+        save_user_config(config)
         print("\n  ✓ Memory provider: built-in only")
         print("  Saved to config.yaml\n")
         return
@@ -397,7 +397,7 @@ def cmd_setup(args) -> None:
 
     # Write activation key to config.yaml
     config["memory"]["provider"] = name
-    save_config(config)
+    save_user_config(config)
 
     # Write non-secret config to provider's native location
     hermes_home = str(Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))))

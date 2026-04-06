@@ -349,10 +349,10 @@ def load_permanent_allowlist() -> set:
 def save_permanent_allowlist(patterns: set):
     """Save permanently allowed command patterns to config."""
     try:
-        from hermes_cli.config import load_config, save_config
+        from hermes_cli.config import load_config, save_user_config
         config = load_config()
         config["command_allowlist"] = list(patterns)
-        save_config(config)
+        save_user_config(config)
     except Exception as e:
         logger.warning("Could not save allowlist: %s", e)
 

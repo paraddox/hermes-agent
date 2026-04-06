@@ -338,7 +338,9 @@ from hermes_cli.config import (
     get_config_path,
     get_env_path,
     load_config,
+    load_raw_config,
     save_config,
+    save_user_config,
     save_env_value,
     get_env_value,
     ensure_hermes_home,
@@ -898,8 +900,6 @@ def setup_model_provider(config: dict):
     This ensures a single code path for all provider setup — any new
     provider added to ``hermes model`` is automatically available here.
     """
-    from hermes_cli.config import load_config, save_config
-
     print_header("Inference Provider")
     print_info("Choose how to connect to your main chat model.")
     print_info(f"   Guide: {_DOCS_BASE}/integrations/providers")
@@ -920,7 +920,7 @@ def setup_model_provider(config: dict):
 
     # Re-sync the wizard's config dict from what cmd_model saved to disk.
     # This is critical: cmd_model writes to disk via its own load/save cycle,
-    # and the wizard's final save_config(config) must not overwrite those
+    # and the wizard's final save_user_config(config) must not overwrite those
     # changes with stale values (#4172).
     _refreshed = load_config()
     config["model"] = _refreshed.get("model", config.get("model"))
@@ -1107,7 +1107,7 @@ def setup_model_provider(config: dict):
         else:
             print_info(f"Keeping your existing TTS provider: {current_tts}")
 
-    save_config(config)
+    save_user_config(config)
 
     # Offer TTS provider selection at the end of model setup, except when
     # Nous subscription defaults are already being applied.
@@ -1292,7 +1292,7 @@ def _setup_tts_provider(config: dict):
     if "tts" not in config:
         config["tts"] = {}
     config["tts"]["provider"] = selected
-    save_config(config)
+    save_user_config(config)
     print_success(f"TTS provider set to: {provider_labels.get(selected, selected)}")
 
 
@@ -1641,7 +1641,7 @@ def setup_terminal_backend(config: dict):
     save_env_value("TERMINAL_ENV", selected_backend)
     if selected_backend == "modal":
         save_env_value("TERMINAL_MODAL_MODE", config["terminal"].get("modal_mode", "auto"))
-    save_config(config)
+    save_user_config(config)
     print()
     print_success(f"Terminal backend set to: {selected_backend}")
 
@@ -1692,7 +1692,7 @@ def setup_agent_settings(config: dict):
         if "display" not in config:
             config["display"] = {}
         config["display"]["tool_progress"] = mode.lower()
-        save_config(config)
+        save_user_config(config)
         print_success(f"Tool progress set to: {mode.lower()}")
     else:
         print_warning(f"Unknown mode '{mode}', keeping '{current_mode}'")
@@ -1703,8 +1703,6 @@ def setup_agent_settings(config: dict):
     print_info(
         "Higher threshold = compress later (use more context). Lower = compress sooner."
     )
-
-    config.setdefault("compression", {})["enabled"] = True
 
     current_threshold = config.get("compression", {}).get("threshold", 0.50)
     threshold_str = prompt("Compression threshold (0.5-0.95)", str(current_threshold))
@@ -1813,7 +1811,7 @@ def setup_agent_settings(config: dict):
         )
     # else: keep current (idx == 4)
 
-    save_config(config)
+    save_user_config(config)
 
 
 # =============================================================================
@@ -2588,7 +2586,7 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
     # Ensure config.yaml exists before migration tries to read it
     config_path = get_config_path()
     if not config_path.exists():
-        save_config(load_config())
+        save_user_config(load_config())
 
     # Dynamically load the migration script
     try:
@@ -2730,7 +2728,7 @@ def run_setup_wizard(args):
                     )
                 )
                 func(config)
-                save_config(config)
+                save_user_config(config)
                 print()
                 print_success(f"{label} configuration complete!")
                 return
@@ -2833,7 +2831,7 @@ def run_setup_wizard(args):
             if section:
                 _, label, func = section
                 func(config)
-                save_config(config)
+                save_user_config(config)
                 _print_setup_summary(config, hermes_home)
             return
     else:
@@ -2895,7 +2893,7 @@ def run_setup_wizard(args):
         setup_tools(config, first_install=not is_existing)
 
     # Save and show summary
-    save_config(config)
+    save_user_config(config)
     _print_setup_summary(config, hermes_home)
 
 
@@ -3059,7 +3057,7 @@ def _run_quick_setup(config: dict, hermes_home):
 
         # Update config version
         config["_config_version"] = latest_ver
-        save_config(config)
+        save_user_config(config)
 
     # Jump to summary
     _print_setup_summary(config, hermes_home)

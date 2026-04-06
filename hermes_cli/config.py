@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+import copy
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -1463,7 +1464,7 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                 display["tool_progress"] = "all"
                 results["config_added"].append("display.tool_progress=all (default)")
             config["display"] = display
-            save_config(config)
+            save_user_config(config)
             if not quiet:
                 print(f"  ✓ Migrated tool progress to config.yaml: {display['tool_progress']}")
     
@@ -1478,7 +1479,7 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
             else:
                 config["timezone"] = ""
                 results["config_added"].append("timezone= (empty, uses server-local)")
-            save_config(config)
+            save_user_config(config)
             if not quiet:
                 tz_display = config["timezone"] or "(server-local)"
                 print(f"  ✓ Added timezone to config.yaml: {tz_display}")
@@ -1657,12 +1658,12 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
         
         # Update version and save
         config["_config_version"] = latest_ver
-        save_config(config)
+        save_user_config(config)
     elif current_ver < latest_ver:
         # Just update version
         config = load_config()
         config["_config_version"] = latest_ver
-        save_config(config)
+        save_user_config(config)
     
     return results
 
@@ -1753,30 +1754,144 @@ def _normalize_max_turns_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
+def load_raw_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Load the user-authored config.yaml without merging defaults."""
+    ensure_hermes_home()
+    config_path = config_path or get_config_path()
+
+    if not config_path.exists():
+        return {}
+
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            loaded = yaml.safe_load(f) or {}
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception as e:
+        print(f"Warning: Failed to load config: {e}")
+        return {}
+
+
+def _prune_default_values(current, defaults):
+    """Return only values that differ from defaults, preserving unknown keys."""
+    if isinstance(current, dict) and isinstance(defaults, dict):
+        pruned = {}
+        for key, value in current.items():
+            if key == "_config_version":
+                pruned[key] = value
+                continue
+            if key not in defaults:
+                pruned[key] = value
+                continue
+            default_value = defaults[key]
+            if isinstance(value, dict) and isinstance(default_value, dict):
+                nested = _prune_default_values(value, default_value)
+                if nested:
+                    pruned[key] = nested
+            elif value != default_value:
+                pruned[key] = value
+        return pruned
+    return current if current != defaults else None
+
+
+def _preserve_raw_existing_values(
+    desired: Any,
+    raw_existing: Any,
+    expanded_existing: Any,
+) -> Any:
+    """Preserve raw user-authored values when the effective value is unchanged.
+
+    This keeps placeholders like ``${GLM_API_KEY}`` intact on disk even when a
+    caller mutates an env-expanded config object returned by ``load_config()``.
+    """
+    if desired == expanded_existing:
+        return copy.deepcopy(raw_existing)
+
+    if (
+        isinstance(desired, dict)
+        and isinstance(raw_existing, dict)
+        and isinstance(expanded_existing, dict)
+    ):
+        preserved = {}
+        for key, value in desired.items():
+            if key in raw_existing and key in expanded_existing:
+                preserved[key] = _preserve_raw_existing_values(
+                    value,
+                    raw_existing[key],
+                    expanded_existing[key],
+                )
+            else:
+                preserved[key] = value
+        return preserved
+
+    if (
+        isinstance(desired, list)
+        and isinstance(raw_existing, list)
+        and isinstance(expanded_existing, list)
+        and len(desired) == len(raw_existing) == len(expanded_existing)
+    ):
+        return [
+            _preserve_raw_existing_values(value, raw_existing[i], expanded_existing[i])
+            for i, value in enumerate(desired)
+        ]
+
+    return desired
+
+
+def _commented_config_sections(normalized: Dict[str, Any]) -> Optional[str]:
+    """Return optional commented config sections to append to the YAML file."""
+    parts = []
+    sec = normalized.get("security", {})
+    if not sec or sec.get("redact_secrets") is None:
+        parts.append(_SECURITY_COMMENT)
+    fb = normalized.get("fallback_model", {})
+    if not fb or not (fb.get("provider") and fb.get("model")):
+        parts.append(_FALLBACK_COMMENT)
+    return "".join(parts) if parts else None
+
+
+def _write_config_yaml(
+    config: Dict[str, Any],
+    *,
+    commented_from: Optional[Dict[str, Any]] = None,
+    config_path: Optional[Path] = None,
+) -> None:
+    """Write a config mapping to ~/.hermes/config.yaml with standard comments."""
+    if is_managed():
+        managed_error("save configuration")
+        return
+    from utils import atomic_yaml_write
+
+    ensure_hermes_home()
+    config_path = config_path or get_config_path()
+    normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
+    comment_source = _normalize_root_model_keys(
+        _normalize_max_turns_config(commented_from or config)
+    )
+
+    atomic_yaml_write(
+        config_path,
+        normalized,
+        extra_content=_commented_config_sections(comment_source),
+    )
+    _secure_file(config_path)
+
+
 
 def load_config() -> Dict[str, Any]:
     """Load configuration from ~/.hermes/config.yaml."""
     import copy
-    ensure_hermes_home()
-    config_path = get_config_path()
     
     config = copy.deepcopy(DEFAULT_CONFIG)
-    
-    if config_path.exists():
-        try:
-            with open(config_path, encoding="utf-8") as f:
-                user_config = yaml.safe_load(f) or {}
 
-            if "max_turns" in user_config:
-                agent_user_config = dict(user_config.get("agent") or {})
-                if agent_user_config.get("max_turns") is None:
-                    agent_user_config["max_turns"] = user_config["max_turns"]
-                user_config["agent"] = agent_user_config
-                user_config.pop("max_turns", None)
+    user_config = load_raw_config()
+    if "max_turns" in user_config:
+        agent_user_config = dict(user_config.get("agent") or {})
+        if agent_user_config.get("max_turns") is None:
+            agent_user_config["max_turns"] = user_config["max_turns"]
+        user_config["agent"] = agent_user_config
+        user_config.pop("max_turns", None)
 
-            config = _deep_merge(config, user_config)
-        except Exception as e:
-            print(f"Warning: Failed to load config: {e}")
+    config = _deep_merge(config, user_config)
     
     return _expand_env_vars(_normalize_root_model_keys(_normalize_max_turns_config(config)))
 
@@ -1876,33 +1991,28 @@ _COMMENTED_SECTIONS = """
 """
 
 
-def save_config(config: Dict[str, Any]):
+def save_config(config: Dict[str, Any], *, config_path: Optional[Path] = None):
     """Save configuration to ~/.hermes/config.yaml."""
-    if is_managed():
-        managed_error("save configuration")
-        return
-    from utils import atomic_yaml_write
+    _write_config_yaml(config, config_path=config_path)
 
-    ensure_hermes_home()
-    config_path = get_config_path()
+def save_raw_config(config: Dict[str, Any], *, config_path: Optional[Path] = None) -> None:
+    """Save raw user config without default pruning, but with standard formatting."""
+    _write_config_yaml(config, commented_from=config, config_path=config_path)
+
+def save_user_config(config: Dict[str, Any], *, config_path: Optional[Path] = None):
+    """Save only user-authored overrides to ~/.hermes/config.yaml."""
     normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
-
-    # Build optional commented-out sections for features that are off by
-    # default or only relevant when explicitly configured.
-    parts = []
-    sec = normalized.get("security", {})
-    if not sec or sec.get("redact_secrets") is None:
-        parts.append(_SECURITY_COMMENT)
-    fb = normalized.get("fallback_model", {})
-    if not fb or not (fb.get("provider") and fb.get("model")):
-        parts.append(_FALLBACK_COMMENT)
-
-    atomic_yaml_write(
-        config_path,
-        normalized,
-        extra_content="".join(parts) if parts else None,
+    raw_existing = _normalize_root_model_keys(
+        _normalize_max_turns_config(load_raw_config(config_path=config_path))
     )
-    _secure_file(config_path)
+    expanded_existing = _expand_env_vars(copy.deepcopy(raw_existing))
+    preserved = _preserve_raw_existing_values(
+        normalized,
+        raw_existing,
+        expanded_existing,
+    )
+    user_config = _prune_default_values(preserved, DEFAULT_CONFIG) or {}
+    _write_config_yaml(user_config, commented_from=preserved, config_path=config_path)
 
 
 def load_env() -> Dict[str, str]:
@@ -2334,7 +2444,7 @@ def edit_config():
     
     # Ensure config exists
     if not config_path.exists():
-        save_config(DEFAULT_CONFIG)
+        save_user_config(load_config())
         print(f"Created {config_path}")
     
     # Find editor
@@ -2381,17 +2491,10 @@ def set_config_value(key: str, value: str):
         print(f"✓ Set {key} in {get_env_path()}")
         return
     
-    # Otherwise it goes to config.yaml
-    # Read the raw user config (not merged with defaults) to avoid
-    # dumping all default values back to the file
+    # Otherwise it goes to config.yaml. Preserve the exact raw file shape for
+    # explicit CLI edits, including default-valued keys like model="".
     config_path = get_config_path()
-    user_config = {}
-    if config_path.exists():
-        try:
-            with open(config_path, encoding="utf-8") as f:
-                user_config = yaml.safe_load(f) or {}
-        except Exception:
-            user_config = {}
+    user_config = load_raw_config(config_path=config_path)
     
     # Handle nested keys (e.g., "tts.provider")
     parts = key.split('.')
@@ -2414,10 +2517,7 @@ def set_config_value(key: str, value: str):
     
     current[parts[-1]] = value
     
-    # Write only user config back (not the full merged defaults)
-    ensure_hermes_home()
-    with open(config_path, 'w', encoding="utf-8") as f:
-        yaml.dump(user_config, f, default_flow_style=False, sort_keys=False)
+    save_raw_config(user_config, config_path=config_path)
     
     # Keep .env in sync for keys that terminal_tool reads directly from env vars.
     # config.yaml is authoritative, but terminal_tool only reads TERMINAL_ENV etc.

@@ -464,14 +464,14 @@ def _interactive_strategy() -> None:
         print("Invalid choice.")
         return
 
-    from hermes_cli.config import load_config, save_config
-    cfg = load_config()
+    from hermes_cli.config import load_raw_config, save_user_config
+    cfg = load_raw_config()
     pool_strategies = cfg.get("credential_pool_strategies") or {}
     if not isinstance(pool_strategies, dict):
         pool_strategies = {}
     pool_strategies[provider] = strategy
     cfg["credential_pool_strategies"] = pool_strategies
-    save_config(cfg)
+    save_user_config(cfg)
     print(f"Set {provider} strategy to: {strategy}")
 
 

@@ -1,5 +1,6 @@
 """Tests for hermes_cli configuration management."""
 
+import importlib
 import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -8,6 +9,7 @@ import yaml
 
 from hermes_cli.config import (
     DEFAULT_CONFIG,
+    edit_config,
     get_hermes_home,
     ensure_hermes_home,
     load_config,
@@ -15,6 +17,8 @@ from hermes_cli.config import (
     migrate_config,
     remove_env_value,
     save_config,
+    save_user_config,
+    set_config_value,
     save_env_value,
     save_env_value_secure,
     sanitize_env_file,
@@ -111,6 +115,133 @@ class TestSaveAndLoadRoundtrip:
 
             reloaded = load_config()
             assert reloaded["terminal"]["timeout"] == 999
+
+    def test_migrate_config_preserves_user_overrides_without_materializing_defaults(
+        self, tmp_path
+    ):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "_config_version": 4,
+                        "compression": {"threshold": 0.8},
+                        "custom_section": {"keep": True},
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+
+            migrate_config(interactive=False, quiet=True)
+
+            saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            assert saved["compression"]["threshold"] == 0.8
+            assert saved["custom_section"] == {"keep": True}
+            assert "terminal" not in saved
+
+    def test_edit_config_bootstraps_minimal_user_config(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("EDITOR", "fake-editor")
+
+        with patch("hermes_cli.config.subprocess.run") as mock_run:
+            edit_config()
+
+        mock_run.assert_called_once()
+        saved = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+        assert "_config_version" in saved
+        assert "terminal" not in saved
+        assert "browser" not in saved
+
+    def test_set_config_value_uses_shared_user_config_writer(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "custom_section": {"keep": True},
+                        "compression": {"enabled": False},
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+
+            set_config_value("model.default", "new-model")
+
+            saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            assert saved["custom_section"] == {"keep": True}
+            assert saved["compression"] == {"enabled": False}
+            assert saved["model"] == {"default": "new-model"}
+            assert saved["agent"]["max_turns"] == DEFAULT_CONFIG["agent"]["max_turns"]
+
+            raw_text = config_path.read_text(encoding="utf-8")
+            assert "# ── Security" in raw_text
+
+    def test_save_user_config_preserves_raw_env_placeholders(self, tmp_path):
+        with patch.dict(
+            os.environ,
+            {"HERMES_HOME": str(tmp_path), "GLM_API_KEY": "secret-key-123"},
+            clear=False,
+        ):
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "mcp_servers": {
+                            "zread": {
+                                "url": "https://example.com",
+                                "headers": {"Authorization": "Bearer ${GLM_API_KEY}"},
+                            }
+                        }
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_config()
+            save_user_config(config)
+
+            saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            assert (
+                saved["mcp_servers"]["zread"]["headers"]["Authorization"]
+                == "Bearer ${GLM_API_KEY}"
+            )
+
+    def test_cli_save_config_value_preserves_raw_env_placeholders(self, tmp_path):
+        with patch.dict(
+            os.environ,
+            {"HERMES_HOME": str(tmp_path), "GLM_API_KEY": "secret-key-123"},
+            clear=False,
+        ):
+            import cli as cli_mod
+
+            cli_mod = importlib.reload(cli_mod)
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "model": {"default": "old-model"},
+                        "mcp_servers": {
+                            "zread": {
+                                "url": "https://example.com",
+                                "headers": {"Authorization": "Bearer ${GLM_API_KEY}"},
+                            }
+                        },
+                        "custom_section": {"keep": True},
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+
+            assert cli_mod.save_config_value("display.skin", "slate") is True
+
+            saved = config_path.read_text(encoding="utf-8")
+            assert "Bearer ${GLM_API_KEY}" in saved
+            assert "skin: slate" in saved
+            assert "# ── Security" in saved
 
 
 class TestSaveEnvValueSecure:

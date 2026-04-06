@@ -4,6 +4,8 @@ import ast
 from pathlib import Path
 from unittest.mock import patch as mock_patch
 
+from hermes_cli.config import get_config_path
+
 import tools.approval as approval_module
 from tools.approval import (
     _get_approval_mode,
@@ -15,6 +17,7 @@ from tools.approval import (
     load_permanent,
     pop_pending,
     prompt_dangerous_approval,
+    save_permanent_allowlist,
     submit_pending,
 )
 
@@ -221,6 +224,29 @@ class TestSessionKeyContext:
 
         assert pop_pending("alice") is not None
         assert pop_pending("bob") is None
+
+
+class TestPermanentAllowlistPersistence:
+    def test_save_permanent_allowlist_preserves_raw_placeholders(self, monkeypatch):
+        monkeypatch.setenv("GLM_API_KEY", "secret-key-123")
+        config_path = get_config_path()
+        config_path.write_text(
+            "custom_section:\n"
+            "  keep: true\n"
+            "mcp_servers:\n"
+            "  zread:\n"
+            "    headers:\n"
+            "      Authorization: Bearer ${GLM_API_KEY}\n",
+            encoding="utf-8",
+        )
+
+        save_permanent_allowlist({"git status"})
+
+        saved = config_path.read_text(encoding="utf-8")
+        assert "Authorization: Bearer ${GLM_API_KEY}" in saved
+        assert "command_allowlist:" in saved
+        assert "- git status" in saved
+        assert "terminal:" not in saved
 
 
 class TestRmFalsePositiveFix:
@@ -714,5 +740,3 @@ class TestNormalizationBypass:
         cmd = "\uff4c\uff53 -\uff4c\uff41 /tmp"
         dangerous, key, desc = detect_dangerous_command(cmd)
         assert dangerous is False
-
-

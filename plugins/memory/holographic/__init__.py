@@ -130,17 +130,13 @@ class HolographicMemoryProvider(MemoryProvider):
     def save_config(self, values, hermes_home):
         """Write config to config.yaml under plugins.hermes-memory-store."""
         from pathlib import Path
+        from hermes_cli.config import load_raw_config, save_user_config
         config_path = Path(hermes_home) / "config.yaml"
         try:
-            import yaml
-            existing = {}
-            if config_path.exists():
-                with open(config_path) as f:
-                    existing = yaml.safe_load(f) or {}
+            existing = load_raw_config(config_path=config_path)
             existing.setdefault("plugins", {})
             existing["plugins"]["hermes-memory-store"] = values
-            with open(config_path, "w") as f:
-                yaml.dump(existing, f, default_flow_style=False)
+            save_user_config(existing, config_path=config_path)
         except Exception:
             pass
 
