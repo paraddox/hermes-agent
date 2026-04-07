@@ -1125,7 +1125,7 @@ def _clear_stale_openai_base_url():
               else f"Cleared stale OPENAI_BASE_URL from .env (was: {stale_url})")
 
 
-def _prompt_provider_choice(choices, *, default=0):
+def _prompt_provider_choice(choices, default=0):
     """Show provider selection menu with curses arrow-key navigation.
 
     Falls back to a numbered list when curses is unavailable (e.g. piped
@@ -1494,8 +1494,15 @@ def _model_flow_custom(config):
 
     try:
         base_url = input(f"API base URL [{current_url or 'e.g. https://api.example.com/v1'}]: ").strip()
-        import getpass
-        api_key = getpass.getpass(f"API key [{current_key[:8] + '...' if current_key else 'optional'}]: ").strip()
+        if sys.stdin.isatty():
+            import getpass
+            api_key = getpass.getpass(
+                f"API key [{current_key[:8] + '...' if current_key else 'optional'}]: "
+            ).strip()
+        else:
+            api_key = input(
+                f"API key [{current_key[:8] + '...' if current_key else 'optional'}]: "
+            ).strip()
     except (KeyboardInterrupt, EOFError):
         print("\nCancelled.")
         return
