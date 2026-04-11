@@ -1044,7 +1044,7 @@ def test_release_lease_decrements_counter(tmp_path, monkeypatch):
     assert pool._active_leases.get("cred-1", 0) == 1
 
     pool.release_lease("cred-1")
-    assert pool.active_lease_count("cred-1") == 0
+    assert pool._active_leases.get("cred-1", 0) == 0
 
 
 def test_load_pool_does_not_seed_claude_code_when_anthropic_not_configured(tmp_path, monkeypatch):
