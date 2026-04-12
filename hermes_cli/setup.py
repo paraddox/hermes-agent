@@ -77,6 +77,11 @@ def _supports_same_provider_pool_setup(provider: str) -> bool:
     return pconfig.auth_type in {"api_key", "oauth_device_code"}
 
 
+_FIREWORKS_FIRE_PASS_MODELS = [
+    "accounts/fireworks/routers/kimi-k2p5-turbo",
+]
+
+
 # Default model lists per provider — used as fallback when the live
 # /models endpoint can't be reached.
 _DEFAULT_PROVIDER_MODELS = {
@@ -103,6 +108,12 @@ _DEFAULT_PROVIDER_MODELS = {
         "gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-3.1-flash-lite-preview",
         "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite",
         "gemma-4-31b-it", "gemma-4-26b-it",
+    ],
+    "fireworks": [
+        *_FIREWORKS_FIRE_PASS_MODELS,
+        "accounts/fireworks/models/kimi-k2p5",
+        "accounts/fireworks/models/glm-5",
+        "accounts/fireworks/models/deepseek-v3p1",
     ],
     "zai": ["glm-5", "glm-4.7", "glm-4.5", "glm-4.5-flash"],
     "kimi-coding": ["kimi-k2.5", "kimi-k2-thinking", "kimi-k2-turbo-preview"],

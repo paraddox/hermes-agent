@@ -373,6 +373,20 @@ class TestGetModelContextLength:
 
         assert result == 200000
 
+    @patch("agent.model_metadata.fetch_model_metadata")
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_firepass_router_uses_256k_context(self, mock_endpoint_fetch, mock_fetch):
+        mock_fetch.return_value = {}
+        mock_endpoint_fetch.return_value = {}
+
+        result = get_model_context_length(
+            "accounts/fireworks/routers/kimi-k2p5-turbo",
+            base_url="https://api.fireworks.ai/inference/v1",
+            provider="fireworks",
+        )
+
+        assert result == 256000
+
 
 # =========================================================================
 # _strip_provider_prefix — Ollama model:tag vs provider:model

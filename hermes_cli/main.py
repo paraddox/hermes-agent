@@ -1043,6 +1043,7 @@ def select_provider_and_model(args=None):
         "copilot": "GitHub Copilot",
         "anthropic": "Anthropic",
         "gemini": "Google AI Studio",
+        "fireworks": "Fireworks AI",
         "zai": "Z.AI / GLM",
         "kimi-coding": "Kimi / Moonshot",
         "minimax": "MiniMax",
@@ -1086,6 +1087,7 @@ def select_provider_and_model(args=None):
         ("opencode-go", "OpenCode Go (open models, $10/month subscription)"),
         ("ai-gateway", "AI Gateway (Vercel — 200+ models, pay-per-use)"),
         ("alibaba", "Alibaba Cloud / DashScope Coding (Qwen + multi-provider)"),
+        ("fireworks", "Fireworks AI (open models + Fire Pass)"),
         ("xiaomi", "Xiaomi MiMo (MiMo-V2 models — pro, omni, flash)"),
     ]
 
@@ -1144,9 +1146,12 @@ def select_provider_and_model(args=None):
     ordered.append(("more", "More providers..."))
     ordered.append(("cancel", "Cancel"))
 
-    provider_idx = _prompt_provider_choice(
-        [label for _, label in ordered], default=default_idx,
-    )
+    try:
+        provider_idx = _prompt_provider_choice(
+            [label for _, label in ordered], default=default_idx,
+        )
+    except TypeError:
+        provider_idx = _prompt_provider_choice([label for _, label in ordered])
     if provider_idx is None or ordered[provider_idx][0] == "cancel":
         print("No change.")
         return
@@ -1161,9 +1166,12 @@ def select_provider_and_model(args=None):
             ext_ordered.append(("remove-custom", "Remove a saved custom provider"))
         ext_ordered.append(("cancel", "Cancel"))
 
-        ext_idx = _prompt_provider_choice(
-            [label for _, label in ext_ordered], default=0,
-        )
+        try:
+            ext_idx = _prompt_provider_choice(
+                [label for _, label in ext_ordered], default=0,
+            )
+        except TypeError:
+            ext_idx = _prompt_provider_choice([label for _, label in ext_ordered])
         if ext_idx is None or ext_ordered[ext_idx][0] == "cancel":
             print("No change.")
             return
@@ -1199,7 +1207,7 @@ def select_provider_and_model(args=None):
         _model_flow_anthropic(config, current_model)
     elif selected_provider == "kimi-coding":
         _model_flow_kimi(config, current_model)
-    elif selected_provider in ("gemini", "zai", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface", "xiaomi"):
+    elif selected_provider in ("gemini", "fireworks", "zai", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface", "xiaomi"):
         _model_flow_api_key_provider(config, selected_provider, current_model)
 
     # ── Post-switch cleanup: clear stale OPENAI_BASE_URL ──────────────
@@ -1239,7 +1247,7 @@ def _clear_stale_openai_base_url():
               else f"Cleared stale OPENAI_BASE_URL from .env (was: {stale_url})")
 
 
-def _prompt_provider_choice(choices, *, default=0):
+def _prompt_provider_choice(choices, default=0):
     """Show provider selection menu with curses arrow-key navigation.
 
     Falls back to a numbered list when curses is unavailable (e.g. piped
@@ -1608,8 +1616,15 @@ def _model_flow_custom(config):
 
     try:
         base_url = input(f"API base URL [{current_url or 'e.g. https://api.example.com/v1'}]: ").strip()
-        import getpass
-        api_key = getpass.getpass(f"API key [{current_key[:8] + '...' if current_key else 'optional'}]: ").strip()
+        if sys.stdin.isatty():
+            import getpass
+            api_key = getpass.getpass(
+                f"API key [{current_key[:8] + '...' if current_key else 'optional'}]: "
+            ).strip()
+        else:
+            api_key = input(
+                f"API key [{current_key[:8] + '...' if current_key else 'optional'}]: "
+            ).strip()
     except (KeyboardInterrupt, EOFError):
         print("\nCancelled.")
         return
@@ -2519,7 +2534,17 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
     except Exception:
         pass
 
-    if mdev_models:
+    if provider_id == "fireworks":
+        from hermes_cli.models import provider_model_ids
+
+        model_list = provider_model_ids("fireworks")
+        if model_list:
+            print(f"  Found {len(model_list)} Fireworks model(s)")
+        else:
+            model_list = curated
+            if model_list:
+                print(f"  Showing {len(model_list)} curated models — use \"Enter custom model name\" for others.")
+    elif mdev_models:
         model_list = mdev_models
         print(f"  Found {len(model_list)} model(s) from models.dev registry")
     elif curated and len(curated) >= 8:
@@ -4516,7 +4541,7 @@ For more help on a command:
     )
     chat_parser.add_argument(
         "--provider",
-        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "gemini", "huggingface", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "xiaomi"],
+        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "gemini", "huggingface", "fireworks", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "xiaomi"],
         default=None,
         help="Inference provider (default: auto)"
     )

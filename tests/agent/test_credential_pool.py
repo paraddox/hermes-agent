@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -1051,7 +1052,6 @@ def test_load_pool_does_not_seed_claude_code_when_anthropic_not_configured(tmp_p
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     _write_auth_store(tmp_path, {"version": 1, "credential_pool": {}})
 
-    # Claude Code credentials exist on disk
     monkeypatch.setattr(
         "agent.anthropic_adapter.read_claude_code_credentials",
         lambda: {"accessToken": "sk-ant...oken", "refreshToken": "rt", "expiresAt": 9999999999999},
@@ -1060,14 +1060,19 @@ def test_load_pool_does_not_seed_claude_code_when_anthropic_not_configured(tmp_p
         "agent.anthropic_adapter.read_hermes_oauth_credentials",
         lambda: None,
     )
-    # User configured kimi-coding, NOT anthropic
     monkeypatch.setattr(
         "hermes_cli.auth.is_provider_explicitly_configured",
         lambda pid: pid == "kimi-coding",
     )
 
     from agent.credential_pool import load_pool
+
     pool = load_pool("anthropic")
 
-    # Should NOT have seeded the claude_code entry
     assert pool.entries() == []
+
+
+def test_credential_pool_does_not_directly_import_pool_store_helpers_from_auth():
+    source = Path("agent/credential_pool.py").read_text(encoding="utf-8")
+    assert "read_credential_pool," not in source
+    assert "write_credential_pool," not in source

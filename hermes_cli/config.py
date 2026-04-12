@@ -768,6 +768,14 @@ OPTIONAL_ENV_VARS = {
         "category": "provider",
         "advanced": True,
     },
+    "FIREWORKS_API_KEY": {
+        "description": "Fireworks API key for direct Fireworks model access",
+        "prompt": "Fireworks API key",
+        "url": "https://app.fireworks.ai/api-keys",
+        "password": True,
+        "category": "provider",
+        "advanced": True,
+    },
     "GEMINI_API_KEY": {
         "description": "Google AI Studio API key (alias for GOOGLE_API_KEY)",
         "prompt": "Gemini API key",
@@ -779,6 +787,14 @@ OPTIONAL_ENV_VARS = {
     "GEMINI_BASE_URL": {
         "description": "Google AI Studio base URL override",
         "prompt": "Gemini base URL (leave empty for default)",
+        "url": None,
+        "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
+    "FIREWORKS_BASE_URL": {
+        "description": "Fireworks base URL override",
+        "prompt": "Fireworks base URL (leave empty for default)",
         "url": None,
         "password": False,
         "category": "provider",
